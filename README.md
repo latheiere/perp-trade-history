@@ -1,130 +1,66 @@
 # Perp Trade History
 
-Collect perpetual-account history through read-only APIs, retain auditable source
-records, and produce fast cross-venue PnL reports in one configured currency.
+A private trading analytics cockpit for long-term perpetual-account history.
+Headline PnL rarely explains what happened: strategies, exposure, and results change
+across years. Perp Trade History makes those changes explorable while keeping every
+conclusion connected to retained evidence—and never needs permission to trade.
 
-- Portable Python package with one required runtime dependency.
-- Idempotent collection and normalization with explicit coverage status.
-- Collection-time currency conversion backed by daily spot-rate sidecars.
-- Compact reports grouped by venue and base symbol, with verbose contract detail
-  available on demand.
-- Operator-initiated archive backfill, one-shot reruns, weekly REST scheduling,
-  and signed backups.
-
-Python 3.11 or newer is required.
+- One polished, scrollable report for performance, patterns, risk, and trades
+- Interactive comparisons across periods, market classes, directions, and exposure
+- Automatic updates as new history arrives
+- Trustworthy drill-downs, visible data quality, and auditable retained records
+- Local ownership with read-only account access
 
 ## Quick start
 
-```bash
-git clone https://github.com/latheiere/perp-trade-history.git
-cd perp-trade-history
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
+Python 3.11 or newer is required.
 
-cp config/config.example.toml config/config.toml
-cp config/credentials.env.example config/credentials.env
-chmod 600 config/credentials.env
-```
+1. Download and bootstrap.
 
-Choose a reporting currency and enable the required venue adapters in
-`config/config.toml`:
+   ```bash
+   git clone https://github.com/latheiere/perp-trade-history.git
+   cd perp-trade-history
+   make bootstrap
+   ```
 
-```toml
-[storage]
-data_dir = "data"
+2. Enable the required adapters in `config/config.toml` and add read-only credentials
+   to `config/credentials.env`.
 
-[reporting]
-target_currency = "USDT"
-conversion_method = "previous_day.close"
+3. Load available history and open the dashboard.
 
-[venues.binance]
-enabled = true
-```
+   ```bash
+   make first-run
+   ```
 
-Add read-only credentials to `config/credentials.env`, then validate, collect, and
-report:
-
-```bash
-perp-trade-history \
-  --config config/config.toml \
-  --secrets config/credentials.env \
-  check-config
-
-perp-trade-history \
-  --config config/config.toml \
-  --secrets config/credentials.env \
-  collect
-
-perp-trade-history-pnl --config config/config.toml
-```
-
-The collector accepts only HTTP `GET` operations. Credentials should have account
-and trade-history read permissions without order, transfer, or withdrawal access.
+Credentials need account and trade-history access only. Do not grant order,
+transfer, or withdrawal permissions.
 
 ## Reporting
 
-Collection is followed by a shared conversion pass. Daily rates are stored once in
-`normalized/conversion_rates.csv`; converted cashflow values are stored separately
-in `normalized/cashflow_conversions.csv`. Reports use those persisted values and
-never request market data.
+Use the interactive dashboard for visual investigation and compact text or JSON
+reports for automation. Results remain comparable in the configured reporting
+currency, with incomplete source coverage visible rather than silently ignored.
 
-Compact output is the default. It removes contract quote and delivery suffixes,
-groups records by base symbol and venue, and prints venue totals in the configured
-reporting currency. Use `--verbose` for full contract symbols and currency detail.
+See [currency conversion](docs/conversion.md) for reporting-currency behavior.
 
-```bash
-perp-trade-history-pnl --config config/config.toml --period month
-perp-trade-history-pnl --config config/config.toml --verbose
-perp-trade-history --config config/config.toml report --period month --json
-```
+## Interactive analytics
 
-Changing the target currency, price selector, or fixed-rate configuration marks
-stored conversions as stale. Rebuild them explicitly:
+The dashboard highlights performance, changing patterns, reconstructed episodes,
+and data quality across materially different periods. It adapts as retained history
+grows and clearly marks metrics that the available evidence cannot support.
 
-```bash
-perp-trade-history --config config/config.toml recalculate-conversions
-```
-
-See [currency conversion](docs/conversion.md) for rate selection, fixed fallbacks,
-storage, and recalculation behavior.
+See [dashboard and analytics](docs/dashboard.md) for the detailed analytical scope,
+metric boundaries, and service usage.
 
 ## Configuration and data
 
-The portable templates are
-[`config/config.example.toml`](config/config.example.toml) and
-[`config/credentials.env.example`](config/credentials.env.example). Configuration,
-credential, and data locations can also be supplied through:
+Portable configuration templates are provided in [`config`](config). Collected
+history remains local, auditable, and independent of the dashboard process.
 
-```text
-PERP_TRADE_HISTORY_CONFIG
-PERP_TRADE_HISTORY_ENV_FILE
-PERP_TRADE_HISTORY_DATA_DIR
-```
-
-Durable state remains human-readable:
-
-```text
-normalized/   canonical CSV tables and conversion sidecars
-raw/          retained API JSON Lines and source archives
-state/        checkpoints, failures, schedules, and coverage state
-```
-
-See [operations](docs/operations.md) for scheduling, diagnostics, optional backups,
-and storage guarantees. Binance users should follow the focused
-[historical archive backfill guide](docs/binance-archive-backfill.md).
-
-## Optional features
-
-The base installation requires only Requests. Signed backup commands are isolated
-behind an extra; local control-plane packages are not dependencies.
-
-```bash
-python -m pip install ".[backup]"
-```
-
-Recurring services are also optional. Interactive collection and reporting require
-neither a service manager nor a private local module.
+See [operations](docs/operations.md) for configuration, collection, diagnostics,
+storage guarantees, and deployment. See
+[historical archive coverage](docs/binance-archive-backfill.md) for extending the
+available source history.
 
 ## Development
 
@@ -134,9 +70,9 @@ python -m pytest
 ruff check .
 ```
 
-Open an issue with the command, sanitized error, Python version, affected adapter
-category, and whether the history came from REST collection or archive import.
-Never include credentials, signatures, signed URLs, or account identifiers.
+When reporting a problem, include the command, sanitized error, Python version,
+affected adapter category, and source-history method. Never include credentials,
+signatures, signed URLs, or account identifiers.
 
 ## License
 

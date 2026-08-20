@@ -37,5 +37,20 @@ workloads:
     workload_class: data
     concurrency: singleton-writer
     shutdown_signal: SIGTERM
+  - id: dashboard
+    lifecycle: daemon
+    command: [perp-trade-history-dashboard, --config, "{config}", --host, 127.0.0.1, --port, "{port:dashboard}", --no-browser]
+    workload_class: presentation
+    concurrency: read-only
+    shutdown_signal: SIGTERM
+network:
+  listeners:
+    - id: dashboard
+      protocol: http
+      scope: loopback
+      host: 127.0.0.1
+      port_argument: --port
+      health_paths: [/readyz]
 health:
+  readiness_endpoint: /readyz
   doctor_command: [perp-trade-history, --config, "{config}", doctor]

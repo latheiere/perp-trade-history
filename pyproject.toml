@@ -18,13 +18,26 @@ dependencies = [
 backup = [
   "statecrate>=0.1,<0.2",
 ]
+dashboard = [
+  "dash>=4.4,<5",
+  "dash-ag-grid>=35.2,<36",
+  "dash-mantine-components>=2.8,<3",
+  "plotly>=6.9,<7",
+  "waitress>=3.0,<4",
+]
 dev = [
+  "dash>=4.4,<5",
+  "dash-ag-grid>=35.2,<36",
+  "dash-mantine-components>=2.8,<3",
+  "plotly>=6.9,<7",
   "pytest>=8.0,<9",
   "ruff>=0.12,<1",
+  "waitress>=3.0,<4",
 ]
 
 [project.scripts]
 perp-trade-history = "perp_trade_history.cli:main"
+perp-trade-history-dashboard = "perp_trade_history.dashboard.cli:main"
 perp-trade-history-pnl = "perp_trade_history.text_report:main"
 
 [tool.setuptools]
@@ -32,6 +45,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"perp_trade_history.dashboard" = ["assets/*.css"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

@@ -2,6 +2,8 @@
 
 The core package supports interactive collection and reporting without a service
 manager, backup library, or private local module. The workflows below are optional.
+For a short extension-oriented entry point, see
+[optional extensions](optional-extensions.md).
 
 ## Collection and coverage
 
@@ -39,6 +41,21 @@ the optional recurring integration surface. Neither is required for manual comma
 
 An overlapping singleton collection is reported as a successful skip because the
 active writer retains exclusive ownership of the data directory.
+
+## Dashboard service
+
+The interactive dashboard is a read-only optional process. It derives analytics
+from the normalized tables in memory, refreshes after the input files change, and
+can run independently of collection:
+
+```bash
+python -m pip install ".[dashboard]"
+perp-trade-history-dashboard --config config/config.toml
+```
+
+Direct startup opens the local page after its readiness check succeeds. Supervisors
+should bind the process to a loopback address and pass `--no-browser`; readiness is
+available at `/readyz`. No derived database is required or retained.
 
 ## Backup and restore
 

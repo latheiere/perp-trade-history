@@ -15,6 +15,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from perp_trade_history.archive_schedule import (
+    ArchiveRerunScheduler,
+    parse_schedule_delay,
+    scheduled_time,
+)
 from perp_trade_history.binance_archives import (
     ARCHIVE_KINDS,
     ARCHIVE_MONTHLY_LIMITS,
@@ -75,16 +80,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     weekly.add_argument("--json", action="store_true", help="Emit JSON")
 
-    archive_initializer = subparsers.add_parser(
-        "initialize-archives",
-        help="Advance initial Binance export backfill when that venue is enabled",
-    )
-    archive_initializer.add_argument("--json", action="store_true", help="Emit JSON")
-
     archives = subparsers.add_parser(
         "archives", help="Manage asynchronous historical exports and manual archive imports"
     )
     archive_commands = archives.add_subparsers(dest="archive_command", required=True)
+    archive_backfill = archive_commands.add_parser(
+        "backfill",
+        help="Advance the operator-initiated Binance historical archive fill",
+    )
+    archive_backfill.add_argument(
+        "--end", help="Inclusive UTC target end fixed on the first run; defaults to now"
+    )
+    scheduling = archive_backfill.add_mutually_exclusive_group()
+    scheduling.add_argument(
+        "--schedule-next",
+        action="store_true",
+        help="Schedule one rerun at the next persisted poll or quota date",
+    )
+    scheduling.add_argument(
+        "--schedule-in",
+        metavar="DELAY",
+        help="Schedule one rerun after a delay such as 10m or 31d",
+    )
+    archive_backfill.add_argument(
+        "--scheduled", action="store_true", help=argparse.SUPPRESS
+    )
+    archive_backfill.add_argument("--json", action="store_true", help="Emit JSON")
     archive_request = archive_commands.add_parser(
         "request-next", help="Request the next detected Binance history gap"
     )
@@ -121,6 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Show Binance export jobs, merged coverage, and detected gaps"
     )
     archive_status.add_argument("--json", action="store_true", help="Emit JSON")
+    archive_schedule = archive_commands.add_parser(
+        "schedule", help="Manage an explicitly requested one-shot archive rerun"
+    )
+    archive_schedule_commands = archive_schedule.add_subparsers(
+        dest="archive_schedule_command", required=True
+    )
+    archive_schedule_cancel = archive_schedule_commands.add_parser(
+        "cancel", help="Cancel the pending one-shot archive rerun"
+    )
+    archive_schedule_cancel.add_argument("--json", action="store_true", help="Emit JSON")
     archive_import = archive_commands.add_parser(
         "import", help="Import an exchange-provided Binance CSV or compressed archive"
     )
@@ -260,42 +291,9 @@ def run(argv: list[str] | None = None) -> int:
             payload["schedule"] = schedule.decision(now).to_dict()
             _emit(payload, as_json=args.json)
             return 1 if result.errors else 0
-        if args.command == "initialize-archives":
-            config = _load(args, require_credentials=False)
-            if not config.venues["binance"].enabled:
-                _emit(
-                    {
-                        "ok": True,
-                        "status": "disabled",
-                        "message": "Binance archive initialization is not enabled",
-                    },
-                    as_json=args.json,
-                )
-                return 0
-            config = _load(args, require_credentials=True)
-            _check_secret_permissions(config)
-            store = DataStore(config.data_dir)
-            with _collector_lock(store.root / "state" / "collector.lock"):
-                actions = BinanceArchiveCoordinator(config, store).backfill_step(
-                    end_ms=int(datetime.now(tz=UTC).timestamp() * 1000)
-                )
-                conversion_sources = run_conversion_pass(
-                    config, store, venues={"binance"}
-                )
-            payload = {
-                "ok": not any(action.status == "error" for action in actions)
-                and not any(source.error for source in conversion_sources),
-                "status": "advanced",
-                "actions": [action.to_dict() for action in actions],
-                "conversion_sources": [
-                    source.to_dict() for source in conversion_sources
-                ],
-            }
-            _log_archive_actions(actions)
-            _emit(payload, as_json=args.json)
-            return 1 if not payload["ok"] else 0
         if args.command == "archives":
             require_credentials = args.archive_command in {
+                "backfill",
                 "request-next",
                 "request-range",
                 "backfill-step",
@@ -306,11 +304,31 @@ def run(argv: list[str] | None = None) -> int:
                 _check_secret_permissions(config)
             store = DataStore(config.data_dir)
             coordinator = BinanceArchiveCoordinator(config, store)
+            rerun_scheduler = ArchiveRerunScheduler(store.root)
             if args.archive_command == "status":
-                _emit(coordinator.status(), as_json=args.json)
+                archive_status_payload = coordinator.status()
+                archive_status_payload["schedule"] = rerun_scheduler.status()
+                _emit(archive_status_payload, as_json=args.json)
                 return 0
+            if args.archive_command == "schedule":
+                schedule_payload = rerun_scheduler.cancel()
+                _emit(
+                    {"ok": True, "status": "cancelled", "schedule": schedule_payload},
+                    as_json=args.json,
+                )
+                return 0
+            if args.archive_command == "backfill" and args.scheduled:
+                rerun_scheduler.mark_running()
             with _collector_lock(store.root / "state" / "collector.lock"):
-                if args.archive_command in {"request-next", "backfill-step"}:
+                backfill_status: dict[str, Any] = {}
+                if args.archive_command == "backfill":
+                    now = datetime.now(tz=UTC)
+                    end_ms = _time_arg(args.end) if args.end else int(now.timestamp() * 1000)
+                    actions, backfill_status = coordinator.backfill(
+                        end_ms=end_ms,
+                        now=now,
+                    )
+                elif args.archive_command in {"request-next", "backfill-step"}:
                     end_ms = (
                         _time_arg(args.end)
                         if args.end
@@ -352,9 +370,21 @@ def run(argv: list[str] | None = None) -> int:
                     parser.error(f"unknown archive command: {args.archive_command}")
                 conversion_sources = (
                     run_conversion_pass(config, store, venues={"binance"})
-                    if args.archive_command in {"backfill-step", "poll", "import"}
+                    if args.archive_command in {"backfill", "backfill-step", "poll", "import"}
                     else []
                 )
+            schedule_payload = rerun_scheduler.status()
+            if args.archive_command == "backfill":
+                run_at: datetime | None = None
+                if args.schedule_in:
+                    run_at = datetime.now(tz=UTC) + parse_schedule_delay(args.schedule_in)
+                elif args.schedule_next and backfill_status.get("next_action_at"):
+                    run_at = scheduled_time(str(backfill_status["next_action_at"]))
+                if run_at is not None:
+                    schedule_payload = rerun_scheduler.schedule(
+                        run_at=run_at,
+                        command=_archive_backfill_command(config),
+                    )
             payload = {
                 "ok": not any(action.status == "error" for action in actions)
                 and not any(source.error for source in conversion_sources),
@@ -363,8 +393,19 @@ def run(argv: list[str] | None = None) -> int:
                     source.to_dict() for source in conversion_sources
                 ],
             }
+            if args.archive_command == "backfill":
+                payload["status"] = backfill_status["status"]
+                payload["backfill"] = backfill_status
+                payload["schedule"] = schedule_payload
+                if args.schedule_next and not backfill_status.get("next_action_at"):
+                    payload["schedule"] = {
+                        **schedule_payload,
+                        "message": "no rerun is needed for the current backfill state",
+                    }
             _log_archive_actions(actions)
             _emit(payload, as_json=args.json)
+            if args.archive_command == "backfill" and args.scheduled:
+                rerun_scheduler.complete(success=bool(payload["ok"]))
             return 1 if not payload["ok"] else 0
         if args.command == "status":
             config = _load(args, require_credentials=False)
@@ -525,6 +566,8 @@ def _doctor(config: AppConfig) -> dict[str, Any]:
         archive_status = coordinator.status()
         jobs = archive_status["jobs"]
         archive = {
+            "backfill": archive_status["backfill"],
+            "rerun_schedule": ArchiveRerunScheduler(store.root).status(),
             "coverage": archive_status["coverage"],
             "job_statuses": dict(
                 sorted(Counter(str(job.get("status") or "unknown") for job in jobs).items())
@@ -594,6 +637,20 @@ def _check_secret_permissions(config: AppConfig) -> None:
 
 def _time_arg(value: str) -> int:
     return int(parse_datetime(value).timestamp() * 1000)
+
+
+def _archive_backfill_command(config: AppConfig) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "perp_trade_history",
+        "--config",
+        str(config.path),
+    ]
+    if config.secrets_path:
+        command.extend(["--secrets", str(config.secrets_path)])
+    command.extend(["archives", "backfill", "--scheduled"])
+    return command
 
 
 class _BelowWarningFilter(logging.Filter):
@@ -670,6 +727,11 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
     if "weekly_schedule" in payload and "source_failures" in payload:
         _emit_doctor_summary(payload)
         return
+    if isinstance(payload.get("backfill"), dict) and isinstance(
+        payload.get("jobs"), list
+    ):
+        _emit_archive_status(payload)
+        return
     sources = payload.get("sources")
     if isinstance(sources, list) and all(isinstance(source, dict) for source in sources):
         _emit_collection_summary(payload, sources)
@@ -737,8 +799,12 @@ def _emit_doctor_summary(payload: dict[str, Any]) -> None:
         print(
             "Archives: "
             f"jobs={json.dumps(archive.get('job_statuses', {}), sort_keys=True)} "
-            f"parse_failures={len(archive.get('parse_failures', []))}"
+            f"parse_failures={len(archive.get('parse_failures', []))} "
+            f"backfill={archive.get('backfill', {}).get('status', 'not_started')}"
         )
+        archive_backfill = archive.get("backfill", {})
+        if archive_backfill.get("next_action_at"):
+            print(f"  next_archive_run={archive_backfill['next_action_at']}")
         for kind, quota in sorted(archive.get("quota", {}).items()):
             print(
                 f"  {kind}: quota={quota.get('used', 0)}/{quota.get('limit', 0)} "
@@ -812,6 +878,30 @@ def _emit_archive_summary(payload: dict[str, Any], actions: list[dict[str, Any]]
         f"{count} {action_status}" for action_status, count in sorted(counts.items())
     )
     print(f"Archive status: {status}")
+    backfill = payload.get("backfill")
+    if isinstance(backfill, dict):
+        print(
+            "Coverage: "
+            f"target={backfill.get('expected_start_at') or 'unknown'}.."
+            f"{backfill.get('target_end_at') or 'unknown'} "
+            f"covered_back_to={backfill.get('covered_back_to') or 'not yet'}"
+        )
+        print(
+            "Remaining: "
+            f"report_years={backfill.get('remaining_report_years', 0)} "
+            f"order_years={backfill.get('remaining_order_years', 0)} "
+            f"files={backfill.get('remaining_files', 0)} "
+            f"pending={backfill.get('pending_exports', 0)}"
+        )
+        next_window = backfill.get("next_window")
+        if isinstance(next_window, dict) and next_window:
+            print(
+                "Next window: "
+                f"{next_window.get('start_at')}..{next_window.get('end_at')} "
+                f"datasets={','.join(next_window.get('missing_kinds', []))}"
+            )
+        if backfill.get("next_action_at"):
+            print(f"Next recommended run: {backfill['next_action_at']}")
     print(f"Actions: {len(actions)}" + (f" ({count_text})" if count_text else ""))
     for action in actions:
         detail = (
@@ -823,6 +913,70 @@ def _emit_archive_summary(payload: dict[str, Any], actions: list[dict[str, Any]]
         if action.get("message"):
             detail += f": {action['message']}"
         print(detail)
+    schedule = payload.get("schedule")
+    if isinstance(schedule, dict):
+        print(
+            "Rerun schedule: "
+            f"status={schedule.get('status', 'not_scheduled')} "
+            f"at={schedule.get('run_at') or 'none'} "
+            f"mechanism={schedule.get('mechanism') or 'manual'}"
+        )
+        if schedule.get("message"):
+            print(f"Schedule note: {schedule['message']}")
+        if schedule.get("status") == "manual_rerun_required" and schedule.get(
+            "manual_command"
+        ):
+            print(f"Run manually: {schedule['manual_command']}")
+
+
+def _emit_archive_status(payload: dict[str, Any]) -> None:
+    backfill = payload["backfill"]
+    jobs = payload.get("jobs", [])
+    job_counts = dict(
+        sorted(Counter(str(job.get("status") or "unknown") for job in jobs).items())
+    )
+    print(f"Archive backfill: {str(backfill.get('status') or 'unknown').replace('_', ' ')}")
+    print(
+        "Coverage: "
+        f"target={backfill.get('expected_start_at') or 'unknown'}.."
+        f"{backfill.get('target_end_at') or 'not started'} "
+        f"covered_back_to={backfill.get('covered_back_to') or 'not yet'}"
+    )
+    print(
+        "Remaining: "
+        f"report_years={backfill.get('remaining_report_years', 0)} "
+        f"order_years={backfill.get('remaining_order_years', 0)} "
+        f"files={backfill.get('remaining_files', 0)} "
+        f"pending={backfill.get('pending_exports', 0)}"
+    )
+    next_window = backfill.get("next_window")
+    if isinstance(next_window, dict) and next_window:
+        print(
+            "Next window: "
+            f"{next_window.get('start_at')}..{next_window.get('end_at')} "
+            f"datasets={','.join(next_window.get('missing_kinds', []))}"
+        )
+    if backfill.get("next_action_at"):
+        print(f"Next recommended run: {backfill['next_action_at']}")
+    print(f"Jobs: {json.dumps(job_counts, sort_keys=True)}")
+    for kind, quota in sorted(backfill.get("quota", {}).items()):
+        print(
+            f"  {kind}: quota={quota.get('used', 0)}/{quota.get('limit', 0)} "
+            f"remaining={quota.get('remaining', 0)}"
+        )
+    schedule = payload.get("schedule", {})
+    print(
+        "Rerun schedule: "
+        f"status={schedule.get('status', 'not_scheduled')} "
+        f"at={schedule.get('run_at') or 'none'} "
+        f"mechanism={schedule.get('mechanism') or 'manual'}"
+    )
+    if schedule.get("message"):
+        print(f"Schedule note: {schedule['message']}")
+    if schedule.get("status") == "manual_rerun_required" and schedule.get(
+        "manual_command"
+    ):
+        print(f"Run manually: {schedule['manual_command']}")
 
 
 def _write_csv(rows: list[dict[str, Any]], output: Path | None) -> None:

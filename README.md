@@ -8,7 +8,8 @@ records, and produce fast cross-venue PnL reports in one configured currency.
 - Collection-time currency conversion backed by daily spot-rate sidecars.
 - Compact reports grouped by venue and base symbol, with verbose contract detail
   available on demand.
-- Optional archive backfill, recurring scheduling, and signed backups.
+- Operator-initiated archive backfill, one-shot reruns, weekly REST scheduling,
+  and signed backups.
 
 Python 3.11 or newer is required.
 
@@ -109,8 +110,9 @@ raw/          retained API JSON Lines and source archives
 state/        checkpoints, failures, schedules, and coverage state
 ```
 
-See [operations](docs/operations.md) for archive ingestion, scheduling, diagnostics,
-optional backups, and storage guarantees.
+See [operations](docs/operations.md) for scheduling, diagnostics, optional backups,
+and storage guarantees. Binance users should follow the focused
+[historical archive backfill guide](docs/binance-archive-backfill.md).
 
 ## Optional features
 

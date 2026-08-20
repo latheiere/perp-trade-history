@@ -17,3 +17,13 @@ def test_core_install_uses_only_public_runtime_dependency() -> None:
     assert project["optional-dependencies"]["backup"] == ["statecrate>=0.1,<0.2"]
     assert "tradier-dev" not in str(project).lower()
     assert project["scripts"]["perp-trade-history-pnl"].endswith("text_report:main")
+
+
+def test_runtime_contract_schedules_only_rest_collection() -> None:
+    root = Path(__file__).resolve().parents[1]
+    contract = (root / "runtime-contract.yaml").read_text(encoding="utf-8")
+
+    assert "weekly_rest_ingestion" in contract
+    assert "weekly-collect" in contract
+    assert "initialize-archives" not in contract
+    assert "initial_archive_backfill" not in contract

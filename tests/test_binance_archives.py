@@ -1,6 +1,7 @@
 import gzip
 import io
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -263,6 +264,23 @@ class FailingRequestArchiveAdapter(FakeArchiveAdapter):
         if len(self.requests) == 1:
             raise ConnectionError("request result is unknown")
         return {"downloadId": f"download-{len(self.requests)}"}
+
+
+class QuotaRequestArchiveAdapter(FakeArchiveAdapter):
+    def request_archive(
+        self, kind: str, *, start_ms: int, end_ms: int
+    ) -> dict[str, Any]:
+        self.requests.append((kind, start_ms, end_ms))
+        raise ApiError(
+            "GET /archive returned HTTP 400: request limitation is 5 times per month",
+            status_code=400,
+        )
+
+
+class ProcessingArchiveAdapter(FakeArchiveAdapter):
+    def poll_archive(self, kind: str, download_id: str) -> dict[str, Any]:
+        self.polls.append((kind, download_id))
+        return {"downloadId": download_id, "status": "processing"}
 
 
 def test_archive_parser_accepts_plain_zip_and_gzip_csv() -> None:
@@ -681,3 +699,113 @@ def test_overlapping_complete_ranges_merge_and_next_request_targets_remaining_ga
     )[0]
     assert next_request.status == "requested"
     assert next_request.end_ms == overlap_start - 1
+
+
+def test_manual_backfill_requests_newest_annual_windows_by_year_and_dataset(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = DataStore(config.data_dir)
+    real = BinanceAdapter(config, config.venues["binance"], store)
+    fake = FakeArchiveAdapter(real, TRADE_CSV)
+    coordinator = BinanceArchiveCoordinator(config, store, adapter=fake)  # type: ignore[arg-type]
+    now = datetime.now(tz=UTC)
+    end_ms = int(now.timestamp() * 1000)
+
+    actions, status = coordinator.backfill(end_ms=end_ms, now=now)
+
+    requested = [action for action in actions if action.status == "requested"]
+    assert [action.kind for action in requested[:6]] == [
+        "trades",
+        "income",
+        "orders",
+        "trades",
+        "income",
+        "orders",
+    ]
+    assert len([action for action in requested if action.kind == "trades"]) == 5
+    assert len([action for action in requested if action.kind == "income"]) == 5
+    assert len([action for action in requested if action.kind == "orders"]) == 5
+    assert actions[-1].status == "waiting_for_quota"
+    assert actions[-1].kind == "trades"
+    assert status["target_end_at"].startswith(now.date().isoformat())
+    assert status["pending_exports"] == 15
+    assert status["remaining_report_years"] > 0
+    assert status["next_poll_at"]
+
+    repeated, repeated_status = coordinator.backfill(
+        end_ms=end_ms + 86_400_000,
+        now=now + timedelta(minutes=1),
+    )
+
+    assert repeated == []
+    assert repeated_status["target_end_at"] == status["target_end_at"]
+
+
+def test_manual_backfill_waits_ten_minutes_before_polling_pending_exports(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = DataStore(config.data_dir)
+    real = BinanceAdapter(config, config.venues["binance"], store)
+    fake = ProcessingArchiveAdapter(real, TRADE_CSV)
+    coordinator = BinanceArchiveCoordinator(config, store, adapter=fake)  # type: ignore[arg-type]
+    now = datetime.now(tz=UTC)
+    end_ms = config.collection.initial_start_ms + 10_000
+
+    coordinator.backfill(end_ms=end_ms, now=now)
+    early, _ = coordinator.backfill(
+        end_ms=end_ms,
+        now=now + timedelta(minutes=9),
+    )
+    due, status = coordinator.backfill(
+        end_ms=end_ms,
+        now=now + timedelta(minutes=11),
+    )
+
+    assert early == []
+    assert len(fake.polls) == 3
+    assert all(action.status == "processing" for action in due)
+    assert status["status"] == "waiting_for_exports"
+    assert status["next_poll_at"]
+
+
+def test_monthly_export_response_stops_a_report_pair_without_masking_other_errors(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = DataStore(config.data_dir)
+    real = BinanceAdapter(config, config.venues["binance"], store)
+    fake = QuotaRequestArchiveAdapter(real, TRADE_CSV)
+    coordinator = BinanceArchiveCoordinator(config, store, adapter=fake)  # type: ignore[arg-type]
+    now = datetime.now(tz=UTC)
+
+    actions, status = coordinator.backfill(
+        end_ms=config.collection.initial_start_ms + 10_000,
+        now=now,
+    )
+
+    assert len(fake.requests) == 1
+    assert actions[0].kind == "trades"
+    assert actions[0].status == "waiting_for_quota"
+    assert status["status"] == "waiting_for_quota"
+    assert status["quota_exhausted_kinds"] == ["trades"]
+    assert status["next_request_at"]
+
+
+def test_non_quota_archive_error_keeps_its_failure_classification(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = DataStore(config.data_dir)
+    real = BinanceAdapter(config, config.venues["binance"], store)
+    fake = FailingRequestArchiveAdapter(real, TRADE_CSV)
+    coordinator = BinanceArchiveCoordinator(config, store, adapter=fake)  # type: ignore[arg-type]
+
+    actions, status = coordinator.backfill(
+        end_ms=config.collection.initial_start_ms + 10_000,
+        now=datetime.now(tz=UTC),
+    )
+
+    assert len(fake.requests) == 1
+    assert actions[0].status == "error"
+    assert status["status"] == "ready"
+    assert status["next_request_at"] == ""

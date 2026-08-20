@@ -9,7 +9,7 @@ import os
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +21,15 @@ from perp_trade_history.adapters.binance import (
     canonicalize_binance_archive_row,
 )
 from perp_trade_history.config import AppConfig
-from perp_trade_history.models import parse_datetime, stable_id, utc_now_iso
+from perp_trade_history.errors import ApiError
+from perp_trade_history.models import format_datetime, parse_datetime, stable_id, utc_now_iso
 from perp_trade_history.storage import DataStore, _atomic_text, _exclusive_lock
 from perp_trade_history.sync import SourceResult, SyncEngine
 
 ARCHIVE_KINDS = tuple(BINANCE_ARCHIVE_ENDPOINTS)
 ARCHIVE_MONTHLY_LIMITS = {"orders": 10, "trades": 5, "income": 5}
+ARCHIVE_REPORT_KINDS = ("trades", "income")
+ARCHIVE_POLL_DELAY = timedelta(minutes=10)
 
 
 @dataclass(slots=True)
@@ -82,7 +85,107 @@ class BinanceArchiveCoordinator:
             "coverage": {
                 kind: self._kind_coverage(payload, kind) for kind in ARCHIVE_KINDS
             },
+            "backfill": self._backfill_status(payload),
         }
+
+    def backfill(
+        self,
+        *,
+        end_ms: int,
+        now: datetime | None = None,
+    ) -> tuple[list[ArchiveAction], dict[str, Any]]:
+        """Advance an operator-initiated, year-first historical archive fill."""
+        now_utc = (now or datetime.now(tz=UTC)).astimezone(UTC)
+        with _exclusive_lock(self.lock_path):
+            state = self._load_state()
+            self._ensure_backfill(state, end_ms=end_ms)
+            self._refresh_backfill_state(state, now=now_utc)
+            self._save_state(state)
+
+        actions = self.poll(now=now_utc, minimum_age=ARCHIVE_POLL_DELAY)
+
+        with _exclusive_lock(self.lock_path):
+            state = self._load_state()
+            self._refresh_backfill_state(state, now=now_utc)
+            if self._pending_jobs(state):
+                self._save_state(state)
+                return actions, self._backfill_status(state, now=now_utc)
+
+            backfill = state["backfill"]
+            next_request_text = str(backfill.get("next_request_at") or "")
+            quota_kinds = {
+                str(kind) for kind in backfill.get("quota_exhausted_kinds", [])
+            }
+            if (
+                next_request_text
+                and now_utc < parse_datetime(next_request_text)
+                and quota_kinds.intersection(ARCHIVE_REPORT_KINDS)
+            ):
+                self._save_state(state)
+                return actions, self._backfill_status(state, now=now_utc)
+            if next_request_text and now_utc >= parse_datetime(next_request_text):
+                backfill["next_request_at"] = ""
+                backfill["quota_exhausted_kinds"] = []
+                quota_kinds = set()
+
+            critical_blocked = False
+            orders_blocked = "orders" in quota_kinds
+            for start_ms, window_end_ms in self._backfill_windows(state):
+                missing_report = [
+                    kind
+                    for kind in ARCHIVE_REPORT_KINDS
+                    if not self._interval_is_complete(
+                        state, kind, start_ms, window_end_ms
+                    )
+                ]
+                for kind in missing_report:
+                    action = self._request_backfill_window(
+                        state,
+                        kind=kind,
+                        start_ms=start_ms,
+                        end_ms=window_end_ms,
+                        now=now_utc,
+                    )
+                    actions.append(action)
+                    if action.status in {"waiting_for_quota", "error"}:
+                        critical_blocked = True
+                        break
+                if critical_blocked:
+                    break
+
+                report_ready = all(
+                    self._interval_is_complete(state, kind, start_ms, window_end_ms)
+                    or self._has_active_window_job(
+                        state, kind, start_ms, window_end_ms
+                    )
+                    for kind in ARCHIVE_REPORT_KINDS
+                )
+                if (
+                    report_ready
+                    and not orders_blocked
+                    and not self._interval_is_complete(
+                        state, "orders", start_ms, window_end_ms
+                    )
+                    and not self._has_active_window_job(
+                        state, "orders", start_ms, window_end_ms
+                    )
+                ):
+                    order_action = self._request_backfill_window(
+                        state,
+                        kind="orders",
+                        start_ms=start_ms,
+                        end_ms=window_end_ms,
+                        now=now_utc,
+                    )
+                    actions.append(order_action)
+                    orders_blocked = order_action.status in {
+                        "waiting_for_quota",
+                        "error",
+                    }
+
+            self._refresh_backfill_state(state, now=now_utc)
+            self._save_state(state)
+            return actions, self._backfill_status(state, now=now_utc)
 
     def request_next(
         self,
@@ -274,16 +377,28 @@ class BinanceArchiveCoordinator:
             if not download_id:
                 raise ValueError("archive request returned an empty download id")
         except Exception as exc:
-            job["status"] = "request-error"
+            quota_exhausted = _is_archive_quota_error(exc)
+            job["status"] = "quota-exhausted" if quota_exhausted else "request-error"
             job["last_error"] = str(exc)
+            if quota_exhausted:
+                self._record_quota_wait(
+                    state,
+                    (kind,),
+                    now=parse_datetime(requested_at),
+                )
             self._save_state(state)
             return ArchiveAction(
                 kind,
                 action,
-                "error",
+                "waiting_for_quota" if quota_exhausted else "error",
                 start_ms=start_ms,
                 end_ms=end_ms,
                 message=str(exc),
+                next_eligible_at=(
+                    self._next_month_at(parse_datetime(requested_at))
+                    if quota_exhausted
+                    else ""
+                ),
             )
         job["download_id"] = download_id
         job["status"] = "requested"
@@ -297,14 +412,28 @@ class BinanceArchiveCoordinator:
             download_id=download_id,
         )
 
-    def poll(self) -> list[ArchiveAction]:
+    def poll(
+        self,
+        *,
+        now: datetime | None = None,
+        minimum_age: timedelta = timedelta(0),
+    ) -> list[ArchiveAction]:
         actions: list[ArchiveAction] = []
+        now_utc = (now or datetime.now(tz=UTC)).astimezone(UTC)
         with _exclusive_lock(self.lock_path):
             state = self._load_state()
             for job_key in sorted(state["jobs"]):
                 job = state["jobs"][job_key]
                 if job.get("status") not in {"requested", "processing", "parse-error"}:
                     continue
+                if job.get("status") != "parse-error" and minimum_age:
+                    activity_text = str(
+                        job.get("last_polled_at") or job.get("requested_at") or ""
+                    )
+                    if activity_text and now_utc < (
+                        parse_datetime(activity_text) + minimum_age
+                    ):
+                        continue
                 kind = str(job["kind"])
                 try:
                     if job.get("status") == "parse-error" and job.get("archive_file"):
@@ -543,6 +672,272 @@ class BinanceArchiveCoordinator:
             normalized=normalized.to_dict(),
         )
 
+    def _ensure_backfill(self, state: dict[str, Any], *, end_ms: int) -> None:
+        initial_start_ms = self.config.collection.initial_start_ms
+        if end_ms < initial_start_ms:
+            raise ValueError("archive backfill end cannot precede collection.initial_start")
+        backfill = state.setdefault(
+            "backfill",
+            {
+                "initial_start_ms": initial_start_ms,
+                "target_end_ms": end_ms,
+                "started_at": utc_now_iso(),
+                "completed_at": "",
+                "next_poll_at": "",
+                "next_request_at": "",
+                "quota_exhausted_kinds": [],
+            },
+        )
+        backfill["initial_start_ms"] = initial_start_ms
+        backfill.setdefault("target_end_ms", end_ms)
+        backfill.setdefault("started_at", utc_now_iso())
+        backfill.setdefault("completed_at", "")
+        backfill.setdefault("next_poll_at", "")
+        backfill.setdefault("next_request_at", "")
+        backfill.setdefault("quota_exhausted_kinds", [])
+        for kind in ARCHIVE_KINDS:
+            target = state["targets"].setdefault(kind, {})
+            target["initial_start_ms"] = initial_start_ms
+            target["deep_end_ms"] = int(backfill["target_end_ms"])
+
+    def _request_backfill_window(
+        self,
+        state: dict[str, Any],
+        *,
+        kind: str,
+        start_ms: int,
+        end_ms: int,
+        now: datetime,
+    ) -> ArchiveAction:
+        if self._has_active_window_job(state, kind, start_ms, end_ms):
+            return ArchiveAction(
+                kind,
+                "backfill-request",
+                "skipped",
+                start_ms=start_ms,
+                end_ms=end_ms,
+                message="matching export is pending",
+            )
+        if self._monthly_request_count(state, kind) >= ARCHIVE_MONTHLY_LIMITS[kind]:
+            self._record_quota_wait(state, (kind,), now=now)
+            return ArchiveAction(
+                kind,
+                "backfill-request",
+                "waiting_for_quota",
+                start_ms=start_ms,
+                end_ms=end_ms,
+                message="locally tracked monthly export quota is exhausted",
+                next_eligible_at=self._next_month_at(now),
+            )
+        return self._request_archive(
+            state,
+            kind=kind,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            action="backfill-request",
+        )
+
+    def _record_quota_wait(
+        self,
+        state: dict[str, Any],
+        kinds: tuple[str, ...],
+        *,
+        now: datetime,
+    ) -> None:
+        backfill = state.get("backfill")
+        if not isinstance(backfill, dict):
+            return
+        recorded = {
+            str(kind) for kind in backfill.get("quota_exhausted_kinds", [])
+        }
+        recorded.update(kinds)
+        backfill["quota_exhausted_kinds"] = sorted(recorded)
+        backfill["next_request_at"] = self._next_month_at(now)
+
+    def _refresh_backfill_state(
+        self, state: dict[str, Any], *, now: datetime
+    ) -> None:
+        backfill = state.get("backfill")
+        if not isinstance(backfill, dict):
+            return
+        pending = self._pending_jobs(state)
+        next_poll = ""
+        for job in pending:
+            activity_text = str(
+                job.get("last_polled_at") or job.get("requested_at") or ""
+            )
+            if not activity_text:
+                continue
+            eligible = parse_datetime(activity_text) + ARCHIVE_POLL_DELAY
+            eligible_text = format_datetime(eligible)
+            if not next_poll or eligible_text < next_poll:
+                next_poll = eligible_text
+        backfill["next_poll_at"] = next_poll
+
+        status = self._backfill_status(state, now=now)
+        if status["status"] == "complete":
+            backfill["completed_at"] = str(backfill.get("completed_at") or format_datetime(now))
+            backfill["next_poll_at"] = ""
+            backfill["next_request_at"] = ""
+            backfill["quota_exhausted_kinds"] = []
+        elif backfill.get("completed_at"):
+            backfill["completed_at"] = ""
+
+    def _backfill_status(
+        self,
+        state: dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        backfill = state.get("backfill")
+        if not isinstance(backfill, dict):
+            return {
+                "status": "not_started",
+                "expected_start_at": _format_ms(self.config.collection.initial_start_ms),
+                "target_end_at": "",
+                "covered_back_to": "",
+                "remaining_report_years": 0,
+                "remaining_order_years": 0,
+                "remaining_files": 0,
+                "next_window": {},
+                "next_poll_at": "",
+                "next_request_at": "",
+                "next_action_at": "",
+                "completed_at": "",
+                "quota": self._quota_status(state),
+            }
+
+        windows = self._backfill_windows(state)
+        missing_by_window: list[dict[str, Any]] = []
+        report_remaining = 0
+        order_remaining = 0
+        remaining_files = 0
+        covered_back_to = ""
+        contiguous = True
+        for start_ms, end_ms in windows:
+            missing = [
+                kind
+                for kind in ARCHIVE_KINDS
+                if not self._interval_is_complete(state, kind, start_ms, end_ms)
+            ]
+            missing_report = [kind for kind in missing if kind in ARCHIVE_REPORT_KINDS]
+            if missing_report:
+                report_remaining += 1
+            if "orders" in missing:
+                order_remaining += 1
+            remaining_files += len(missing)
+            if missing:
+                missing_by_window.append(
+                    {
+                        "start_at": _format_ms(start_ms),
+                        "end_at": _format_ms(end_ms),
+                        "missing_kinds": missing,
+                    }
+                )
+            if contiguous and not missing_report:
+                covered_back_to = _format_ms(start_ms)
+            elif missing_report:
+                contiguous = False
+
+        pending = self._pending_jobs(state)
+        next_poll_at = str(backfill.get("next_poll_at") or "")
+        next_request_at = str(backfill.get("next_request_at") or "")
+        now_utc = (now or datetime.now(tz=UTC)).astimezone(UTC)
+        waiting_for_quota = bool(
+            next_request_at and now_utc < parse_datetime(next_request_at)
+        )
+        if not missing_by_window:
+            status = "complete"
+        elif report_remaining == 0:
+            status = "report_complete_orders_pending"
+        elif pending:
+            status = "waiting_for_exports"
+        elif waiting_for_quota:
+            status = "waiting_for_quota"
+        else:
+            status = "ready"
+        return {
+            "status": status,
+            "expected_start_at": _format_ms(int(backfill["initial_start_ms"])),
+            "target_end_at": _format_ms(int(backfill["target_end_ms"])),
+            "covered_back_to": covered_back_to,
+            "remaining_report_years": report_remaining,
+            "remaining_order_years": order_remaining,
+            "remaining_files": remaining_files,
+            "next_window": missing_by_window[0] if missing_by_window else {},
+            "next_poll_at": next_poll_at,
+            "next_request_at": next_request_at,
+            "next_action_at": next_poll_at or next_request_at,
+            "completed_at": str(backfill.get("completed_at") or ""),
+            "quota_exhausted_kinds": list(
+                backfill.get("quota_exhausted_kinds", [])
+            ),
+            "pending_exports": len(pending),
+            "quota": self._quota_status(state),
+        }
+
+    def _quota_status(self, state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            kind: {
+                "used": self._monthly_request_count(state, kind),
+                "limit": ARCHIVE_MONTHLY_LIMITS[kind],
+                "remaining": max(
+                    ARCHIVE_MONTHLY_LIMITS[kind]
+                    - self._monthly_request_count(state, kind),
+                    0,
+                ),
+            }
+            for kind in ARCHIVE_KINDS
+        }
+
+    def _backfill_windows(self, state: dict[str, Any]) -> list[tuple[int, int]]:
+        backfill = state.get("backfill")
+        if not isinstance(backfill, dict):
+            return []
+        initial_start_ms = int(backfill["initial_start_ms"])
+        cursor_end_ms = int(backfill["target_end_ms"])
+        windows: list[tuple[int, int]] = []
+        while cursor_end_ms >= initial_start_ms:
+            start_ms = max(initial_start_ms, cursor_end_ms - ARCHIVE_WINDOW_MS)
+            windows.append((start_ms, cursor_end_ms))
+            cursor_end_ms = start_ms - 1
+        return windows
+
+    def _interval_is_complete(
+        self,
+        state: dict[str, Any],
+        kind: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> bool:
+        return not _uncovered_intervals(
+            self._complete_intervals(state, kind), start_ms, end_ms
+        )
+
+    def _has_active_window_job(
+        self,
+        state: dict[str, Any],
+        kind: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> bool:
+        return any(
+            job.get("account_id") == self.account_id
+            and job.get("kind") == kind
+            and int(job.get("start_ms") or 0) == start_ms
+            and int(job.get("end_ms") or 0) == end_ms
+            and job.get("status") in {"requested", "processing", "parse-error"}
+            for job in state["jobs"].values()
+        )
+
+    def _pending_jobs(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            job
+            for job in state["jobs"].values()
+            if job.get("account_id") == self.account_id
+            and job.get("status") in {"requested", "processing", "parse-error"}
+        ]
+
     def _next_window(
         self,
         state: dict[str, Any],
@@ -627,6 +1022,7 @@ class BinanceArchiveCoordinator:
                 job.get("account_id") != self.account_id
                 or job.get("kind") != kind
                 or not requested_at
+                or job.get("status") == "quota-exhausted"
             ):
                 continue
             requested = parse_datetime(requested_at)
@@ -635,8 +1031,8 @@ class BinanceArchiveCoordinator:
         return count
 
     @staticmethod
-    def _next_month_at() -> str:
-        now = datetime.now(tz=UTC)
+    def _next_month_at(now: datetime | None = None) -> str:
+        now = (now or datetime.now(tz=UTC)).astimezone(UTC)
         if now.month == 12:
             next_month = datetime(now.year + 1, 1, 1, tzinfo=UTC)
         else:
@@ -703,6 +1099,25 @@ class BinanceArchiveCoordinator:
             expiration_ms = 0
         now_ms = int(parse_datetime(utc_now_iso()).timestamp() * 1000)
         return 0 < expiration_ms <= now_ms
+
+
+def _format_ms(value: int) -> str:
+    return format_datetime(datetime.fromtimestamp(value / 1000, tz=UTC))
+
+
+def _is_archive_quota_error(exc: Exception) -> bool:
+    """Recognize the monthly export allowance without conflating HTTP rate limits."""
+    if not isinstance(exc, ApiError) or exc.status_code == 429:
+        return False
+    message = str(exc).lower()
+    monthly_limit_markers = (
+        "times per month",
+        "requests for this month",
+        "request limitation",
+        "monthly download limit",
+        "monthly export limit",
+    )
+    return any(marker in message for marker in monthly_limit_markers)
 
 
 class RetainedArchiveError(ValueError):

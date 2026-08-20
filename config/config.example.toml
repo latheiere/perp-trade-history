@@ -19,6 +19,9 @@ conversion_method = "previous_day.close"
 # INTERNAL_SETTLEMENT_ASSET = "1"
 
 [collection]
+# Earliest required account history. The manual Binance archive backfill fixes this
+# as its lower boundary and persists progress toward it; recurring REST collection
+# never starts historical archive exports. See docs/binance-archive-backfill.md.
 initial_start = "2017-01-01T00:00:00Z"
 overlap_hours = 72
 request_timeout_seconds = 30

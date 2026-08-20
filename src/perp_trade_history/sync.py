@@ -10,6 +10,7 @@ from perp_trade_history.adapters.binance import BinanceAdapter
 from perp_trade_history.adapters.gate import GateAdapter
 from perp_trade_history.adapters.mexc import MexcAdapter
 from perp_trade_history.config import AppConfig
+from perp_trade_history.conversion import CashflowConversionPass
 from perp_trade_history.models import row_for, stable_id, timestamp_fields, utc_now_iso
 from perp_trade_history.storage import DataStore
 
@@ -20,6 +21,38 @@ ADAPTERS: dict[str, type[VenueAdapter]] = {
     "gate": GateAdapter,
     "mexc": MexcAdapter,
 }
+
+
+def run_conversion_pass(
+    config: AppConfig,
+    store: DataStore,
+    *,
+    venues: set[str] | None = None,
+    recalculate: bool = False,
+) -> list[SourceResult]:
+    """Run the shared conversion pass used by automatic and manual workflows."""
+    sources: list[SourceResult] = []
+    for conversion in CashflowConversionPass(store, config).run(
+        venues=venues, recalculate=recalculate
+    ):
+        source = SourceResult(
+            venue=conversion.venue,
+            source="cashflow_conversion",
+            source_records=conversion.converted,
+            error=conversion.error,
+            error_category="conversion" if conversion.error else "",
+            retryable=bool(conversion.error)
+            and "configuration changed" not in conversion.error,
+        )
+        source.tables.update(conversion.tables)
+        sources.append(source)
+        if conversion.error:
+            LOGGER.error(
+                "Cashflow conversion failed: venue=%s error=%s",
+                conversion.venue,
+                conversion.error,
+            )
+    return sources
 
 
 @dataclass(slots=True)
@@ -110,6 +143,13 @@ class SyncEngine:
                 sum(source.source_records for source in venue_sources),
                 time.monotonic() - venue_started,
             )
+        result.sources.extend(
+            run_conversion_pass(
+                self.config,
+                self.store,
+                venues={venue.name for venue in selected},
+            )
+        )
         LOGGER.info(
             "Collection completed: sources=%d failed=%d warnings=%d records=%d "
             "duration_seconds=%.1f",

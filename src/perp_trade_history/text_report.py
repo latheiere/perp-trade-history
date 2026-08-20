@@ -7,7 +7,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from perp_trade_history.config import load_config
-from perp_trade_history.models import parse_datetime
+from perp_trade_history.conversion import ConversionError, StoredCashflowConversion
+from perp_trade_history.models import compact_base_symbol, parse_datetime
 from perp_trade_history.reporting import REPORT_PERIODS, pnl_report
 from perp_trade_history.storage import DataStore
 
@@ -30,39 +31,83 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol", action="append")
     parser.add_argument("--include-supplemental", action="store_true")
     parser.add_argument("--include-non-pnl", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--compact",
+        dest="compact",
+        action="store_true",
+        help="Group converted amounts by venue and base symbol (default)",
+    )
+    mode.add_argument(
+        "--verbose",
+        dest="compact",
+        action="store_false",
+        help="Preserve full contract symbols and the currency column",
+    )
+    parser.set_defaults(compact=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     config = load_config(args.config, secrets_path=args.secrets, require_credentials=False)
     selected_venues = set(args.venue) if args.venue else {
         venue.name for venue in config.enabled_venues
     }
-    rows = pnl_report(
-        DataStore(config.data_dir),
-        period=args.period,
-        group_by=["venue", "symbol", "event_type", "currency"],
-        include_supplemental=args.include_supplemental,
-        include_non_pnl=args.include_non_pnl,
-        start_ms=_time_ms(args.start),
-        end_ms=_time_ms(args.end),
-        venues=selected_venues,
-        symbols=set(args.symbol) if args.symbol else None,
+    store = DataStore(config.data_dir)
+    try:
+        rows = pnl_report(
+            store,
+            period=args.period,
+            group_by=["venue", "symbol", "event_type", "currency"],
+            include_supplemental=args.include_supplemental,
+            include_non_pnl=args.include_non_pnl,
+            start_ms=_time_ms(args.start),
+            end_ms=_time_ms(args.end),
+            venues=selected_venues,
+            symbols=set(args.symbol) if args.symbol else None,
+            conversion=StoredCashflowConversion(
+                store,
+                target_currency=config.reporting.target_currency,
+                method=config.reporting.conversion_method,
+                fixed_rates=config.reporting.fixed_rates,
+            ),
+        )
+    except ConversionError as exc:
+        parser.error(str(exc))
+    print(
+        render_text_report(
+            rows,
+            venues=selected_venues,
+            period=args.period,
+            compact=args.compact,
+            target_currency=config.reporting.target_currency,
+            conversion_method=config.reporting.conversion_method,
+        )
     )
-    print(render_text_report(rows, venues=selected_venues, period=args.period))
 
 
 def render_text_report(
-    rows: list[dict[str, Any]], *, venues: set[str], period: str
+    rows: list[dict[str, Any]],
+    *,
+    venues: set[str],
+    period: str,
+    compact: bool = True,
+    target_currency: str = "USDT",
+    conversion_method: str = "previous_day.close",
 ) -> str:
     grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         key = (
             str(row.get("period_start") or "all"),
             str(row.get("venue") or ""),
-            str(row.get("symbol") or "(account)"),
-            str(row.get("currency") or "(unspecified)"),
+            (
+                compact_base_symbol(str(row.get("symbol") or "")) or "(account)"
+                if compact
+                else str(row.get("symbol") or "(account)")
+            ),
+            target_currency if compact else str(row.get("currency") or "(unspecified)"),
         )
         target = grouped.setdefault(
             key,
@@ -101,7 +146,6 @@ def render_text_report(
         "PERIOD",
         "VENUE",
         "SYMBOL",
-        "CURRENCY",
         "REALIZED",
         "FUNDING",
         "COMMISSION",
@@ -116,8 +160,10 @@ def render_text_report(
         "EVENTS",
         "COVERAGE",
     ]
+    if not compact:
+        headers.insert(3, "CURRENCY")
     table_rows: list[list[str]] = []
-    totals: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+    totals: dict[str, Decimal] = defaultdict(Decimal)
     represented: set[str] = set()
     ranked = sorted(
         grouped.items(),
@@ -128,33 +174,35 @@ def render_text_report(
         represented.add(venue)
         amounts = value["amounts"]
         total = sum(amounts.values(), Decimal(0))
-        totals[(venue, currency)] += total
-        table_rows.append(
-            [
-                period_start,
-                venue,
-                symbol,
-                currency,
-                _number(amounts["realized_pnl"]),
-                _number(amounts["funding"]),
-                _number(amounts["commission"]),
-                _number(amounts["reward"]),
-                _number(amounts["settlement"]),
-                _number(amounts["rebate"]),
-                _number(amounts["bonus"]),
-                _number(amounts["premium"]),
-                _number(amounts["insurance"]),
-                _number(amounts["other"]),
-                _number(total),
-                str(value["events"]),
-                str(value["coverage"]),
-            ]
-        )
+        totals[venue] += total
+        table_row = [
+            period_start,
+            venue,
+            symbol,
+            _number(amounts["realized_pnl"]),
+            _number(amounts["funding"]),
+            _number(amounts["commission"]),
+            _number(amounts["reward"]),
+            _number(amounts["settlement"]),
+            _number(amounts["rebate"]),
+            _number(amounts["bonus"]),
+            _number(amounts["premium"]),
+            _number(amounts["insurance"]),
+            _number(amounts["other"]),
+            _number(total),
+            str(value["events"]),
+            str(value["coverage"]),
+        ]
+        if not compact:
+            table_row.insert(3, currency)
+        table_rows.append(table_row)
 
     lines = [
         "Perpetual account PnL report",
         f"Period grouping: {period}",
-        "Basis: primary signed cashflows; transfers/conversions excluded by default.",
+        f"Basis: primary signed cashflows converted to {target_currency} with venue spot "
+        f"daily {conversion_method.replace('_', ' ')} prices; "
+        "transfers/conversions excluded by default.",
         "Realized PnL represents closed execution outcomes; coverage is never assumed.",
         "",
     ]
@@ -166,10 +214,10 @@ def render_text_report(
     lines.extend(["", "Venue totals:"])
     if totals:
         total_rows = [
-            [venue, currency, _number(amount)]
-            for (venue, currency), amount in sorted(totals.items())
+            [venue, _number(amount)]
+            for venue, amount in sorted(totals.items())
         ]
-        lines.extend(_table(["VENUE", "CURRENCY", "TOTAL"], total_rows))
+        lines.extend(_table(["VENUE", f"TOTAL ({target_currency})"], total_rows))
     else:
         lines.append("  none")
     missing = sorted(venues - represented)

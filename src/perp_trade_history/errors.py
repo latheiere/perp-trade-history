@@ -82,3 +82,7 @@ class CollectionError(ApiError):
 
 class CollectorBusyError(PerpTradeHistoryError):
     """A collection run was skipped because another writer is active."""
+
+
+class OptionalDependencyError(PerpTradeHistoryError):
+    """An explicitly requested optional package surface is not installed."""

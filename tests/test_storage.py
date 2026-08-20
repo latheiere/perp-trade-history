@@ -53,6 +53,32 @@ def test_csv_upsert_extends_history_and_overwrites_updated_source_rows(tmp_path:
     assert "two" in by_id
 
 
+def test_cashflow_conversion_sidecar_does_not_redefine_cashflow_rows(
+    tmp_path: Path,
+) -> None:
+    store = DataStore(tmp_path)
+    cashflow = _cashflow("one", "1", "2026-01-01T00:00:00.000Z")
+    store.upsert("cashflows", [cashflow])
+    store.upsert(
+        "cashflow_conversions",
+        [
+            row_for(
+                "cashflow_conversions",
+                record_id="one",
+                venue="venue",
+                cashflow_record_id="one",
+                cashflow_fingerprint="fingerprint",
+                converted_amount="2",
+                conversion_spec="TARGET|previous_day.close",
+                converted_at="2026-01-02T00:00:00.000Z",
+            )
+        ],
+    )
+
+    assert store.tables["cashflows"].read() == [cashflow]
+    assert store.tables["cashflow_conversions"].read()[0]["converted_amount"] == "2"
+
+
 def test_raw_archive_is_idempotent_and_preserves_unmentioned_rows(tmp_path: Path) -> None:
     store = DataStore(tmp_path)
     one = raw_record(

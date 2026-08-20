@@ -4,6 +4,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -51,6 +52,13 @@ class CollectionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportingSettings:
+    target_currency: str
+    conversion_method: str
+    fixed_rates: dict[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
 class VenueSettings:
     name: str
     enabled: bool
@@ -67,6 +75,7 @@ class AppConfig:
     secrets_path: Path | None
     data_dir: Path
     collection: CollectionSettings
+    reporting: ReportingSettings
     venues: dict[str, VenueSettings]
 
     @property
@@ -151,6 +160,31 @@ def load_config(
         ),
     )
 
+    reporting_payload = _mapping(payload, "reporting")
+    target_currency = str(reporting_payload.get("target_currency", "USDT")).strip().upper()
+    if not target_currency or not re.fullmatch(r"[A-Z0-9]{2,20}", target_currency):
+        raise ConfigurationError(
+            "reporting.target_currency must be an uppercase market currency identifier"
+        )
+    conversion_method = str(
+        reporting_payload.get("conversion_method", "previous_day.close")
+    ).strip()
+    if conversion_method not in {
+        "previous_day.open",
+        "previous_day.close",
+        "current_day.open",
+        "current_day.close",
+    }:
+        raise ConfigurationError(
+            "reporting.conversion_method must select previous_day or current_day "
+            "and open or close"
+        )
+    reporting = ReportingSettings(
+        target_currency=target_currency,
+        conversion_method=conversion_method,
+        fixed_rates=_fixed_rates(reporting_payload),
+    )
+
     venue_payload = _mapping(payload, "venues")
     unknown = set(venue_payload) - SUPPORTED_VENUES
     if unknown:
@@ -205,6 +239,7 @@ def load_config(
         secrets_path=resolved_secrets,
         data_dir=data_dir,
         collection=collection,
+        reporting=reporting,
         venues=venues,
     )
 
@@ -214,6 +249,31 @@ def _mapping(payload: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigurationError(f"{key} must be a table")
     return value
+
+
+def _fixed_rates(payload: dict[str, Any]) -> dict[str, Decimal]:
+    raw = payload.get("fixed_rates", {})
+    if not isinstance(raw, dict):
+        raise ConfigurationError("reporting.fixed_rates must be a table")
+    rates: dict[str, Decimal] = {}
+    for asset, value in raw.items():
+        normalized_asset = str(asset).strip().upper()
+        if not normalized_asset or not re.fullmatch(r"[A-Z0-9]{2,20}", normalized_asset):
+            raise ConfigurationError(
+                "reporting.fixed_rates keys must be uppercase market currency identifiers"
+            )
+        try:
+            rate = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ConfigurationError(
+                f"reporting.fixed_rates.{normalized_asset} must be a decimal"
+            ) from exc
+        if not rate.is_finite() or rate <= 0:
+            raise ConfigurationError(
+                f"reporting.fixed_rates.{normalized_asset} must be positive and finite"
+            )
+        rates[normalized_asset] = rate
+    return rates
 
 
 def _resolve_optional_path(value: str | Path | None, config_path: Path) -> Path | None:
@@ -265,6 +325,13 @@ def _validate_base_url(venue: str, base_url: str) -> None:
 
 
 def _validate_options(venue: str, options: dict[str, Any]) -> None:
+    if options.get("spot_base_url") not in (None, ""):
+        spot_base_url = str(options["spot_base_url"])
+        parsed = urlparse(spot_base_url)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.path not in {"", "/"}:
+            raise ConfigurationError(
+                f"venues.{venue}.spot_base_url must be an HTTPS origin"
+            )
     if venue in {"binance", "mexc"}:
         symbols = options.get("symbols", [])
         if not isinstance(symbols, list) or not all(

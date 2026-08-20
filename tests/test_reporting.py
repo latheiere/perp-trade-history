@@ -1,11 +1,24 @@
-from pathlib import Path
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
-from perp_trade_history.models import row_for
+from perp_trade_history.conversion import StoredCashflowConversion
+from perp_trade_history.models import row_for, stable_id
 from perp_trade_history.reporting import pnl_report
 from perp_trade_history.storage import DataStore
+
+
+class FixedConversion:
+    def prepare(self, rows: list[dict[str, str]]) -> None:
+        self.prepared = len(rows)
+
+    def amount(self, row: dict[str, str]) -> Decimal:
+        rate = Decimal("2") if row["currency"] == "QUOTE_A" else Decimal("3")
+        return Decimal(row["amount"]) * rate
+
+    def currency(self, row: dict[str, str]) -> str:
+        return "USDT"
 
 
 def _flow(
@@ -161,6 +174,95 @@ def test_report_refuses_to_mix_multiple_currencies(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="currency must be grouped"):
         pnl_report(store, period="day", group_by=["venue"])
+
+
+def test_report_converts_before_grouping_multiple_settlement_currencies(
+    tmp_path: Path,
+) -> None:
+    store = DataStore(tmp_path)
+    store.upsert(
+        "cashflows",
+        [
+            _flow(
+                "one",
+                time="2026-01-02T00:00:00.000Z",
+                time_ms="1767312000000",
+                currency="QUOTE_A",
+                amount="1",
+            ),
+            _flow(
+                "two",
+                time="2026-01-02T00:00:00.000Z",
+                time_ms="1767312000000",
+                currency="QUOTE_B",
+                amount="1",
+            ),
+        ],
+    )
+    conversion = FixedConversion()
+
+    rows = pnl_report(
+        store,
+        period="day",
+        group_by=["venue", "currency"],
+        conversion=conversion,
+    )
+
+    assert rows[0]["currency"] == "USDT"
+    assert rows[0]["amount"] == "5"
+    assert rows[0]["events"] == 2
+    assert conversion.prepared == 2
+
+
+def test_report_uses_persisted_amount_without_reading_conversion_rates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DataStore(tmp_path)
+    flow = _flow(
+        "one",
+        time="2026-01-02T00:00:00.000Z",
+        time_ms="1767312000000",
+        currency="QUOTE",
+        amount="1",
+    )
+    store.upsert("cashflows", [flow])
+    store.upsert(
+        "cashflow_conversions",
+        [
+            row_for(
+                "cashflow_conversions",
+                record_id="one",
+                venue="venue",
+                cashflow_record_id="one",
+                cashflow_fingerprint=stable_id(
+                    "venue", "ASSET_QUOTE", "QUOTE", "1", "1767312000000"
+                ),
+                converted_amount="2.5",
+                conversion_spec="TARGET|previous_day.close",
+                converted_at="2026-01-03T00:00:00.000Z",
+            )
+        ],
+    )
+
+    def unexpected_rate_read() -> None:
+        raise AssertionError("report attempted to read conversion rates")
+
+    monkeypatch.setattr(
+        store.tables["conversion_rates"], "iter_read", unexpected_rate_read
+    )
+
+    rows = pnl_report(
+        store,
+        period="day",
+        group_by=["venue", "currency"],
+        conversion=StoredCashflowConversion(
+            store,
+            target_currency="TARGET", method="previous_day.close"
+        ),
+    )
+
+    assert rows[0]["amount"] == "2.5"
+    assert rows[0]["currency"] == "TARGET"
 
 
 def test_report_excludes_non_pnl_cash_movements_unless_requested(tmp_path: Path) -> None:
@@ -328,3 +430,49 @@ def test_report_marks_period_incomplete_until_required_datasets_cover_it(
         group_by=["venue", "event_type", "currency"],
     )
     assert complete[0]["coverage_status"] == "complete"
+
+
+def test_report_builds_coverage_index_once_for_multiple_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DataStore(tmp_path)
+    store.upsert(
+        "cashflows",
+        [
+            _flow(
+                "one",
+                time="2026-01-02T00:00:00.000Z",
+                time_ms="1767312000000",
+                currency="QUOTE",
+                amount="1",
+                venue="binance",
+            ),
+            _flow(
+                "two",
+                time="2026-01-03T00:00:00.000Z",
+                time_ms="1767398400000",
+                currency="QUOTE",
+                amount="2",
+                venue="binance",
+            ),
+        ],
+    )
+    table = store.tables["coverage"]
+    original_read = table.read
+    reads = 0
+
+    def counted_read() -> list[dict[str, str]]:
+        nonlocal reads
+        reads += 1
+        return original_read()
+
+    monkeypatch.setattr(table, "read", counted_read)
+
+    rows = pnl_report(
+        store,
+        period="day",
+        group_by=["venue", "event_type", "currency"],
+    )
+
+    assert len(rows) == 2
+    assert reads == 1

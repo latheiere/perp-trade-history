@@ -54,6 +54,25 @@ def test_binance_fill_produces_execution_and_separate_primary_cashflows() -> Non
     assert all(row["reporting_role"] == "primary" for row in by_type.values())
 
 
+def test_binance_archive_fill_infers_longer_and_delivery_quote_suffixes() -> None:
+    currencies: list[str] = []
+    for index, symbol in enumerate(("ASSETBUSD", "ASSETUSDT_230331"), start=1):
+        normalized = normalize_binance_trade(
+            {
+                "id": index,
+                "symbol": symbol,
+                "time": 1_700_000_000_000,
+                "realizedPnl": "1",
+                "commission": "0",
+            },
+            account_id="primary",
+            source="archive_trades",
+            collected_at=COLLECTED_AT,
+        )
+        currencies.append(normalized.table_rows["cashflows"][0]["currency"])
+    assert currencies == ["BUSD", "USDT"]
+
+
 def test_binance_income_keeps_fill_derived_types_informational() -> None:
     normalized = normalize_binance_income(
         {

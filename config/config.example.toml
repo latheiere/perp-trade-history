@@ -4,6 +4,20 @@ schema_version = 1
 # PERP_TRADE_HISTORY_DATA_DIR overrides this value at runtime.
 data_dir = "data"
 
+[reporting]
+# Persisted on every converted cashflow. Changing either value requires the
+# explicit historical recalculation command before reports can run again.
+target_currency = "USDT"
+# Supported selectors: previous_day.open, previous_day.close,
+# current_day.open, current_day.close. The previous completed close is the
+# safest default for records collected before the current UTC candle closes.
+conversion_method = "previous_day.close"
+
+# Optional auditable fallback for venue-internal assets without a public spot pair.
+# Fixed values are materialized per relevant UTC day in conversion_rates.csv.
+[reporting.fixed_rates]
+# INTERNAL_SETTLEMENT_ASSET = "1"
+
 [collection]
 initial_start = "2017-01-01T00:00:00Z"
 overlap_hours = 72
@@ -16,6 +30,8 @@ max_pages_per_query = 50000
 enabled = false
 account_id = "primary"
 base_url = "https://fapi.binance.com"
+# Optional public spot origin used for persisted daily conversion rates.
+spot_base_url = "https://api.binance.com"
 # Account history and open positions discover relevant contracts. Supplying known
 # historical symbols can include contracts absent from retained account activity.
 symbols = []
@@ -28,10 +44,12 @@ max_public_discovery_symbols = 100
 enabled = false
 account_id = "primary"
 base_url = "https://api.gateio.ws"
+spot_base_url = "https://api.gateio.ws"
 settlements = ["usdt", "btc"]
 
 [venues.mexc]
 enabled = false
 account_id = "primary"
 base_url = "https://contract.mexc.com"
+spot_base_url = "https://api.mexc.com"
 symbols = []

@@ -72,8 +72,11 @@ class CsvTable:
         self.lock_path = path.with_suffix(f"{path.suffix}.lock")
 
     def read(self) -> list[dict[str, str]]:
+        return list(self.iter_read())
+
+    def iter_read(self) -> Iterator[dict[str, str]]:
         if not self.path.exists():
-            return []
+            return
         with self.path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames != self.fieldnames:
@@ -81,7 +84,8 @@ class CsvTable:
                     f"unexpected CSV schema in {self.path}: {reader.fieldnames!r}; "
                     f"expected {self.fieldnames!r}"
                 )
-            return [dict(row) for row in reader]
+            for row in reader:
+                yield dict(row)
 
     def upsert(self, rows: list[dict[str, str]]) -> UpsertStats:
         stats = UpsertStats()
@@ -107,7 +111,6 @@ class CsvTable:
             self._write(merged)
             stats.total = len(merged)
         return stats
-
     def _validate_row(self, row: dict[str, str]) -> None:
         if set(row) != set(self.fieldnames):
             missing = sorted(set(self.fieldnames) - set(row))
@@ -144,8 +147,6 @@ class CsvTable:
         finally:
             if temporary_path.exists():
                 temporary_path.unlink()
-
-
 def raw_record(
     *,
     venue: str,
@@ -403,6 +404,77 @@ class ContractEligibilityStore:
         return f"{venue}:{endpoint}:{contract}"
 
 
+class CoverageIndex:
+    """In-memory coverage intervals reused across every group in one report."""
+
+    def __init__(self, rows: list[dict[str, str]]):
+        intervals: dict[
+            tuple[str, str, str], dict[str, list[tuple[int, int]]]
+        ] = {}
+        scopes: dict[tuple[str, str, str], set[str]] = {}
+        for row in rows:
+            key = (
+                str(row.get("venue") or ""),
+                str(row.get("account_id") or ""),
+                str(row.get("dataset") or ""),
+            )
+            scope = str(row.get("scope") or "account")
+            scopes.setdefault(key, set()).add(scope)
+            if (
+                row.get("status") != "complete"
+                or not row.get("start_time_ms")
+                or not row.get("end_time_ms")
+            ):
+                continue
+            intervals.setdefault(key, {}).setdefault(scope, []).append(
+                (int(row["start_time_ms"]), int(row["end_time_ms"]))
+            )
+        self._scopes = scopes
+        self._intervals = {
+            key: {
+                scope: [tuple(interval) for interval in _merge_coverage_intervals(values)]
+                for scope, values in by_scope.items()
+            }
+            for key, by_scope in intervals.items()
+        }
+
+    def assessment(
+        self,
+        *,
+        venue: str,
+        account_id: str,
+        dataset: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> dict[str, Any]:
+        key = (venue, account_id, dataset)
+        scopes = self._scopes.get(key)
+        if not scopes:
+            return {
+                "status": "unknown",
+                "dataset": dataset,
+                "scopes": {},
+                "gaps": [[start_ms, end_ms]],
+            }
+        assessed_scopes = {"account"} if "account" in scopes else scopes
+        scope_results: dict[str, Any] = {}
+        all_gaps: list[list[int]] = []
+        for scope in sorted(assessed_scopes):
+            complete_intervals = self._intervals.get(key, {}).get(scope, [])
+            gaps = _coverage_gaps(complete_intervals, start_ms, end_ms)
+            scope_results[scope] = {
+                "complete_intervals": [list(interval) for interval in complete_intervals],
+                "gaps": gaps,
+            }
+            all_gaps.extend(gaps)
+        return {
+            "status": "complete" if not all_gaps else "incomplete",
+            "dataset": dataset,
+            "scopes": scope_results,
+            "gaps": all_gaps,
+        }
+
+
 class DataStore:
     def __init__(self, root: Path):
         self.root = root
@@ -462,45 +534,16 @@ class DataStore:
         start_ms: int,
         end_ms: int,
     ) -> dict[str, Any]:
-        rows = [
-            row
-            for row in self.tables["coverage"].read()
-            if row.get("venue") == venue
-            and row.get("account_id") == account_id
-            and row.get("dataset") == dataset
-        ]
-        if not rows:
-            return {
-                "status": "unknown",
-                "dataset": dataset,
-                "scopes": {},
-                "gaps": [[start_ms, end_ms]],
-            }
-        scopes = {row.get("scope") or "account" for row in rows}
-        assessed_scopes = {"account"} if "account" in scopes else scopes
-        scope_results: dict[str, Any] = {}
-        all_gaps: list[list[int]] = []
-        for scope in sorted(assessed_scopes):
-            complete_intervals = [
-                (int(row["start_time_ms"]), int(row["end_time_ms"]))
-                for row in rows
-                if (row.get("scope") or "account") == scope
-                and row.get("status") == "complete"
-                and row.get("start_time_ms")
-                and row.get("end_time_ms")
-            ]
-            gaps = _coverage_gaps(complete_intervals, start_ms, end_ms)
-            scope_results[scope] = {
-                "complete_intervals": _merge_coverage_intervals(complete_intervals),
-                "gaps": gaps,
-            }
-            all_gaps.extend(gaps)
-        return {
-            "status": "complete" if not all_gaps else "incomplete",
-            "dataset": dataset,
-            "scopes": scope_results,
-            "gaps": all_gaps,
-        }
+        return self.coverage_index().assessment(
+            venue=venue,
+            account_id=account_id,
+            dataset=dataset,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+
+    def coverage_index(self) -> CoverageIndex:
+        return CoverageIndex(self.tables["coverage"].read())
 
     def summary(self) -> dict[str, Any]:
         return {

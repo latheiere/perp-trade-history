@@ -16,24 +16,26 @@ non-PnL transfers and supplemental summaries require explicit report flags.
 
 ## Archive ingestion
 
-Supported asynchronous export datasets can extend history beyond REST retention:
+Supported asynchronous export datasets can extend history beyond REST retention.
+Historical backfill is operator-initiated and is not part of the recurring runtime
+workload:
 
 ```bash
-perp-trade-history --config config/config.toml archives backfill-step
+perp-trade-history --config config/config.toml archives backfill
 perp-trade-history --config config/config.toml archives status --json
-perp-trade-history --config config/config.toml archives import \
-  --kind trades --file /path/to/export.zip
 ```
 
 Archive polling and import invoke the same conversion pass as normal collection.
 Original files are retained with content-addressed names; signed download URLs are
-not persisted.
+not persisted. See the [Binance archive backfill guide](binance-archive-backfill.md)
+for configuration, year-first behavior, quota handling, resumption, one-shot reruns,
+and manual recovery imports.
 
 ## Scheduling
 
 `weekly-collect` exposes a persistent UTC schedule gate suitable for an external
-supervisor. `runtime-contract.yaml` describes the optional integration surface.
-Neither is required for manual commands.
+supervisor. It runs ordinary REST ingestion only. `runtime-contract.yaml` describes
+the optional recurring integration surface. Neither is required for manual commands.
 
 An overlapping singleton collection is reported as a successful skip because the
 active writer retains exclusive ownership of the data directory.

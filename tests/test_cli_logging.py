@@ -109,6 +109,42 @@ def test_archive_output_lists_action_outcomes_without_serializing_internal_field
     assert "machine-only-value" not in output
 
 
+def test_archive_backfill_output_explains_coverage_and_next_operator_action(capsys) -> None:
+    payload = {
+        "ok": True,
+        "status": "waiting_for_exports",
+        "actions": [],
+        "backfill": {
+            "expected_start_at": "2022-01-01T00:00:00.000Z",
+            "target_end_at": "2026-08-20T00:00:00.000Z",
+            "covered_back_to": "2025-08-20T00:00:00.000Z",
+            "remaining_report_years": 4,
+            "remaining_order_years": 4,
+            "remaining_files": 12,
+            "pending_exports": 3,
+            "next_window": {
+                "start_at": "2024-08-20T00:00:00.000Z",
+                "end_at": "2025-08-19T23:59:59.999Z",
+                "missing_kinds": ["trades", "income", "orders"],
+            },
+            "next_action_at": "2026-08-20T00:10:00.000Z",
+        },
+        "schedule": {
+            "status": "scheduled",
+            "run_at": "2026-08-20T00:10:00.000Z",
+            "mechanism": "launchd",
+        },
+    }
+
+    cli._emit(payload, as_json=False)
+
+    output = capsys.readouterr().out
+    assert "Archive status: waiting for exports" in output
+    assert "Remaining: report_years=4 order_years=4 files=12 pending=3" in output
+    assert "Next recommended run: 2026-08-20T00:10:00.000Z" in output
+    assert "Rerun schedule: status=scheduled" in output
+
+
 def test_overlapping_singleton_collection_is_a_successful_warning(
     tmp_path, monkeypatch, capsys
 ) -> None:

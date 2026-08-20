@@ -37,11 +37,5 @@ workloads:
     workload_class: data
     concurrency: singleton-writer
     shutdown_signal: SIGTERM
-  - id: initial_archive_backfill
-    lifecycle: batch
-    command: [perp-trade-history, initialize-archives]
-    workload_class: data
-    concurrency: singleton-writer
-    shutdown_signal: SIGTERM
 health:
   doctor_command: [perp-trade-history, --config, "{config}", doctor]

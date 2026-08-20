@@ -135,3 +135,7 @@ ruff check .
 Open an issue with the command, sanitized error, Python version, affected adapter
 category, and whether the history came from REST collection or archive import.
 Never include credentials, signatures, signed URLs, or account identifiers.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

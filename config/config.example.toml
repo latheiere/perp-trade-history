@@ -1,0 +1,37 @@
+schema_version = 1
+
+[storage]
+# PERP_TRADE_HISTORY_DATA_DIR overrides this value at runtime.
+data_dir = "data"
+
+[collection]
+initial_start = "2017-01-01T00:00:00Z"
+overlap_hours = 72
+request_timeout_seconds = 30
+request_retries = 4
+page_limit = 100
+max_pages_per_query = 50000
+
+[venues.binance]
+enabled = false
+account_id = "primary"
+base_url = "https://fapi.binance.com"
+# Account history and open positions discover relevant contracts. Supplying known
+# historical symbols can include contracts absent from retained account activity.
+symbols = []
+discover_active_symbols = true
+# Prevent public catalog discovery from multiplying private history requests across
+# a large venue catalog. Raise only when intentionally querying every listed contract.
+max_public_discovery_symbols = 100
+
+[venues.gate]
+enabled = false
+account_id = "primary"
+base_url = "https://api.gateio.ws"
+settlements = ["usdt", "btc"]
+
+[venues.mexc]
+enabled = false
+account_id = "primary"
+base_url = "https://contract.mexc.com"
+symbols = []

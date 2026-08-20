@@ -1,0 +1,47 @@
+---
+schema_version: 1
+application: perp-trade-history
+artifact:
+  kind: python-wheel
+  distribution: perp-trade-history
+  version_source: pyproject.toml
+  dependency_lock: requirements.lock
+runtime:
+  python: ">=3.11"
+  configuration_argument: --config
+  configuration_environment: PERP_TRADE_HISTORY_CONFIG
+  configuration_check:
+    [perp-trade-history, --config, "{config}", check-config]
+  private_environment_file_environment: PERP_TRADE_HISTORY_ENV_FILE
+  explicit_environment:
+    - PERP_TRADE_HISTORY_CONFIG
+    - PERP_TRADE_HISTORY_ENV_FILE
+    - PERP_TRADE_HISTORY_DATA_DIR
+state:
+  classification: durable
+  storage: normalized-csv-and-raw-jsonl
+  compatibility: append-or-upsert-schema-version-one
+  backup:
+    command: [perp-trade-history, --config, "{config}", backup, --output, "{archive}"]
+    online: true
+    key_files: [statecrate-signing-key.pem, statecrate-verification-key.pem]
+  verify:
+    command: [perp-trade-history, verify-backup, "{archive}"]
+  restore:
+    command: [perp-trade-history, restore-backup, "{archive}", --target, "{staging_dir}"]
+    staging_required: true
+workloads:
+  - id: weekly_rest_ingestion
+    lifecycle: batch
+    command: [perp-trade-history, weekly-collect]
+    workload_class: data
+    concurrency: singleton-writer
+    shutdown_signal: SIGTERM
+  - id: initial_archive_backfill
+    lifecycle: batch
+    command: [perp-trade-history, initialize-archives]
+    workload_class: data
+    concurrency: singleton-writer
+    shutdown_signal: SIGTERM
+health:
+  doctor_command: [perp-trade-history, --config, "{config}", doctor]

@@ -4,10 +4,14 @@ import json
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
-from perp_trade_history.models import decimal_text, parse_datetime
-from perp_trade_history.storage import DataStore
+from perp_trade_history.models import (
+    canonical_settlement_currency,
+    decimal_text,
+    parse_datetime,
+)
+from perp_trade_history.storage import CoverageIndex, DataStore
 
 REPORT_FIELDS = frozenset({"venue", "account_id", "symbol", "event_type", "currency"})
 REPORT_PERIODS = frozenset({"none", "hour", "day", "week", "month", "year"})
@@ -32,6 +36,14 @@ PNL_REQUIRED_DATASETS = {
 NON_PNL_EVENT_TYPES = frozenset({"transfer", "conversion"})
 
 
+class ReportConversion(Protocol):
+    def prepare(self, rows: list[dict[str, str]]) -> None: ...
+
+    def amount(self, row: dict[str, str]) -> Decimal: ...
+
+    def currency(self, row: dict[str, str]) -> str: ...
+
+
 def pnl_report(
     store: DataStore,
     *,
@@ -43,6 +55,7 @@ def pnl_report(
     end_ms: int | None = None,
     venues: set[str] | None = None,
     symbols: set[str] | None = None,
+    conversion: ReportConversion | None = None,
 ) -> list[dict[str, Any]]:
     if period not in REPORT_PERIODS:
         raise ValueError(f"unsupported period: {period}")
@@ -50,30 +63,20 @@ def pnl_report(
     if unknown:
         raise ValueError(f"unsupported group fields: {sorted(unknown)}")
 
-    rows = store.tables["cashflows"].read()
-    selected: list[dict[str, str]] = []
-    allowed_roles = {"primary", "supplemental"} if include_supplemental else {"primary"}
-    for row in rows:
-        if row.get("reporting_role") not in allowed_roles:
-            continue
-        event_type = str(row.get("event_type") or "")
-        if not include_non_pnl and (
-            event_type in NON_PNL_EVENT_TYPES
-            or event_type not in PNL_EVENT_TYPES
-        ):
-            continue
-        timestamp_ms = int(row.get("event_time_ms") or 0)
-        if start_ms is not None and timestamp_ms < start_ms:
-            continue
-        if end_ms is not None and timestamp_ms > end_ms:
-            continue
-        if venues and row.get("venue") not in venues:
-            continue
-        if symbols and row.get("symbol") not in symbols:
-            continue
-        selected.append(row)
+    selected = select_cashflows(
+        store,
+        include_supplemental=include_supplemental,
+        include_non_pnl=include_non_pnl,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        venues=venues,
+        symbols=symbols,
+    )
 
-    currencies = {row.get("currency", "") for row in selected}
+    if conversion:
+        conversion.prepare(selected)
+
+    currencies = {_report_currency(row, conversion) for row in selected}
     if len(currencies) > 1 and "currency" not in group_by:
         raise ValueError("currency must be grouped when multiple settlement currencies are present")
 
@@ -84,20 +87,28 @@ def pnl_report(
     )
     observed_bounds: dict[tuple[str, ...], tuple[int, int]] = {}
     for row in selected:
-        period_start = _period_start(row["event_time"], period)
+        timestamp_ms = int(row.get("event_time_ms") or 0)
+        period_start = _period_start_ms(timestamp_ms, period)
         key_parts = [period_start] if period != "none" else []
-        key_parts.extend(row.get(field, "") for field in group_by)
+        key_parts.extend(
+            _report_currency(row, conversion) if field == "currency" else row.get(field, "")
+            for field in group_by
+        )
         key = tuple(key_parts)
         amount, count = totals[key]
-        totals[key] = amount + Decimal(row.get("amount") or "0"), count + 1
+        report_amount = (
+            conversion.amount(row)
+            if conversion
+            else Decimal(row.get("amount") or "0")
+        )
+        totals[key] = amount + report_amount, count + 1
         contexts[key].add((row.get("venue", ""), row.get("account_id", "")))
-        timestamp_ms = int(row.get("event_time_ms") or 0)
         if row.get("event_type") == "other":
             breakdown = other_breakdowns.setdefault(key, {})
             subtype = str(row.get("event_subtype") or "(missing)")
             other_amount, other_count = breakdown.get(subtype, (Decimal(0), 0))
             breakdown[subtype] = (
-                other_amount + Decimal(row.get("amount") or "0"),
+                other_amount + report_amount,
                 other_count + 1,
             )
         previous_bounds = observed_bounds.get(key, (timestamp_ms, timestamp_ms))
@@ -105,6 +116,16 @@ def pnl_report(
             min(previous_bounds[0], timestamp_ms),
             max(previous_bounds[1], timestamp_ms),
         )
+
+    coverage_index = (
+        store.coverage_index()
+        if any(
+            venue in PNL_REQUIRED_DATASETS
+            for group_contexts in contexts.values()
+            for venue, _account_id in group_contexts
+        )
+        else None
+    )
 
     output: list[dict[str, Any]] = []
     for key, (amount, count) in sorted(totals.items()):
@@ -126,7 +147,7 @@ def pnl_report(
             requested_end_ms=end_ms,
         )
         coverage = _report_coverage(
-            store,
+            coverage_index,
             contexts=contexts[key],
             start_ms=coverage_bounds[0],
             end_ms=coverage_bounds[1],
@@ -159,8 +180,50 @@ def pnl_report(
     return output
 
 
-def _period_start(value: str, period: str) -> str:
-    instant = parse_datetime(value).astimezone(UTC)
+def select_cashflows(
+    store: DataStore,
+    *,
+    include_supplemental: bool = False,
+    include_non_pnl: bool = False,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    venues: set[str] | None = None,
+    symbols: set[str] | None = None,
+) -> list[dict[str, str]]:
+    selected: list[dict[str, str]] = []
+    allowed_roles = {"primary", "supplemental"} if include_supplemental else {"primary"}
+    for row in store.tables["cashflows"].iter_read():
+        if row.get("reporting_role") not in allowed_roles:
+            continue
+        event_type = str(row.get("event_type") or "")
+        if not include_non_pnl and (
+            event_type in NON_PNL_EVENT_TYPES
+            or event_type not in PNL_EVENT_TYPES
+        ):
+            continue
+        timestamp_ms = int(row.get("event_time_ms") or 0)
+        if start_ms is not None and timestamp_ms < start_ms:
+            continue
+        if end_ms is not None and timestamp_ms > end_ms:
+            continue
+        if venues and row.get("venue") not in venues:
+            continue
+        if symbols and row.get("symbol") not in symbols:
+            continue
+        selected.append(row)
+    return selected
+
+
+def _report_currency(
+    row: dict[str, str], conversion: ReportConversion | None
+) -> str:
+    if conversion:
+        return conversion.currency(row)
+    return canonical_settlement_currency(row.get("currency"), row.get("symbol"))
+
+
+def _period_start_ms(value: int, period: str) -> str:
+    instant = datetime.fromtimestamp(value / 1000, tz=UTC)
     if period == "none":
         return ""
     if period == "hour":
@@ -220,20 +283,20 @@ def _next_period_start(start: datetime, period: str) -> datetime:
 
 
 def _report_coverage(
-    store: DataStore,
+    coverage_index: CoverageIndex | None,
     *,
     contexts: set[tuple[str, str]],
     start_ms: int,
     end_ms: int,
 ) -> dict[str, Any] | None:
     relevant = [context for context in sorted(contexts) if context[0] in PNL_REQUIRED_DATASETS]
-    if not relevant:
+    if not relevant or coverage_index is None:
         return None
     details: list[dict[str, Any]] = []
     statuses: list[str] = []
     for venue, account_id in relevant:
         for dataset in PNL_REQUIRED_DATASETS[venue]:
-            assessment = store.coverage_assessment(
+            assessment = coverage_index.assessment(
                 venue=venue,
                 account_id=account_id,
                 dataset=dataset,

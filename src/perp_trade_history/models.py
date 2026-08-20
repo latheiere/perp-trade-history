@@ -186,6 +186,35 @@ COVERAGE_FIELDS = [
     "collected_at",
 ]
 
+CONVERSION_RATE_FIELDS = [
+    "schema_version",
+    "record_id",
+    "venue",
+    "base_currency",
+    "quote_currency",
+    "price_date",
+    "open_time",
+    "open_time_ms",
+    "close_time",
+    "close_time_ms",
+    "open",
+    "close",
+    "complete",
+    "source",
+    "collected_at",
+]
+
+CASHFLOW_CONVERSION_FIELDS = [
+    "schema_version",
+    "record_id",
+    "venue",
+    "cashflow_record_id",
+    "cashflow_fingerprint",
+    "converted_amount",
+    "conversion_spec",
+    "converted_at",
+]
+
 TABLE_FIELDS: dict[str, list[str]] = {
     "cashflows": CASHFLOW_FIELDS,
     "executions": EXECUTION_FIELDS,
@@ -194,6 +223,8 @@ TABLE_FIELDS: dict[str, list[str]] = {
     "positions": POSITION_FIELDS,
     "account_snapshots": SNAPSHOT_FIELDS,
     "coverage": COVERAGE_FIELDS,
+    "conversion_rates": CONVERSION_RATE_FIELDS,
+    "cashflow_conversions": CASHFLOW_CONVERSION_FIELDS,
 }
 
 
@@ -304,14 +335,59 @@ def infer_settlement_currency(symbol: str | None, fallback: str = "") -> str:
         return fallback.upper()
     normalized = symbol.replace("/", "_").replace(":", "_").upper()
     pieces = [piece for piece in normalized.split("_") if piece]
-    if pieces:
-        candidate = pieces[-1]
-        if candidate in {"USD", "USDT", "USDC", "BTC", "ETH", "EUR"}:
-            return candidate
-    for candidate in ("USDT", "USDC", "USD", "BTC", "ETH", "EUR"):
-        if normalized.endswith(candidate):
-            return candidate
+    currencies = (
+        "BUSD",
+        "USDT",
+        "USDC",
+        "USD",
+        "BTC",
+        "ETH",
+        "EUR",
+    )
+    for piece in reversed(pieces):
+        if piece in currencies:
+            return piece
+        for candidate in currencies:
+            if piece.endswith(candidate):
+                return candidate
     return fallback.upper()
+
+
+def canonical_settlement_currency(currency: str | None, symbol: str | None) -> str:
+    """Repair absent or prematurely suffix-matched settlement currencies."""
+    reported = str(currency or "").upper()
+    inferred = infer_settlement_currency(symbol)
+    if not reported:
+        return inferred
+    if reported == "USD" and inferred not in {"", "USD"} and inferred.endswith("USD"):
+        return inferred
+    return reported
+
+
+def compact_base_symbol(symbol: str | None) -> str:
+    """Return the base asset from common perpetual and delivery contract notation."""
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return ""
+    normalized = normalized.replace("/", "_").replace(":", "_").replace("-", "_")
+    pieces = [piece for piece in normalized.split("_") if piece]
+    while len(pieces) > 1 and (pieces[-1].isdigit() or pieces[-1] in {"PERP", "PERPETUAL"}):
+        pieces.pop()
+    joined = "_".join(pieces)
+    quotes = (
+        "BUSD",
+        "USDT",
+        "USDC",
+        "USD",
+        "BTC",
+        "ETH",
+        "EUR",
+    )
+    for quote_currency in quotes:
+        for suffix in (f"_{quote_currency}", quote_currency):
+            if joined.endswith(suffix) and len(joined) > len(suffix):
+                return joined[: -len(suffix)].rstrip("_")
+    return joined
 
 
 def row_for(table: str, **values: Any) -> dict[str, str]:

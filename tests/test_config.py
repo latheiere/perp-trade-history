@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,11 @@ def _write_config(path: Path, *, enabled: str = "mexc") -> None:
 schema_version = 1
 [storage]
 data_dir = "history"
+[reporting]
+target_currency = "USDT"
+conversion_method = "previous_day.close"
+[reporting.fixed_rates]
+WRAPPED = "1"
 [collection]
 initial_start = "2020-01-01T00:00:00Z"
 [venues.{enabled}]
@@ -36,6 +42,9 @@ def test_config_resolves_relative_storage_and_loads_credentials(tmp_path: Path) 
     assert config.data_dir == (tmp_path / "history").resolve()
     assert [venue.name for venue in config.enabled_venues] == ["mexc"]
     assert config.venues["mexc"].api_key == "key"
+    assert config.reporting.target_currency == "USDT"
+    assert config.reporting.conversion_method == "previous_day.close"
+    assert config.reporting.fixed_rates == {"WRAPPED": Decimal("1")}
 
 
 def test_config_requires_credentials_only_for_enabled_venues(tmp_path: Path) -> None:
@@ -84,4 +93,38 @@ def test_config_rejects_filesystem_root_as_data_directory(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError, match="filesystem root"):
+        load_config(config_path, require_credentials=False)
+
+
+def test_config_rejects_non_https_spot_market_origin(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "schema_version=1\n"
+        "[storage]\n"
+        "data_dir='history'\n"
+        "[venues.mexc]\n"
+        "enabled=true\n"
+        "spot_base_url='http://market.invalid'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="spot_base_url must be an HTTPS origin"):
+        load_config(config_path, require_credentials=False)
+
+
+def test_config_rejects_unknown_conversion_method(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "schema_version=1\n"
+        "[storage]\n"
+        "data_dir='history'\n"
+        "[reporting]\n"
+        "target_currency='USDT'\n"
+        "conversion_method='live.ticker'\n"
+        "[venues.mexc]\n"
+        "enabled=true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="conversion_method"):
         load_config(config_path, require_credentials=False)

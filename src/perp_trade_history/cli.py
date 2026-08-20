@@ -22,12 +22,13 @@ from perp_trade_history.binance_archives import (
     BinanceArchiveCoordinator,
 )
 from perp_trade_history.config import AppConfig, load_config
+from perp_trade_history.conversion import StoredCashflowConversion
 from perp_trade_history.errors import CollectorBusyError, PerpTradeHistoryError
 from perp_trade_history.models import parse_datetime, utc_now_iso
 from perp_trade_history.reporting import REPORT_FIELDS, REPORT_PERIODS, pnl_report
 from perp_trade_history.schedule import WeeklyRestSchedule
 from perp_trade_history.storage import DataStore
-from perp_trade_history.sync import SyncEngine
+from perp_trade_history.sync import SyncEngine, run_conversion_pass
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--full", action="store_true", help="Revisit full available history")
     collect.add_argument("--end", help="Inclusive UTC ISO collection end; defaults to now")
     collect.add_argument("--json", action="store_true", help="Emit JSON")
+
+    recalculate = subparsers.add_parser(
+        "recalculate-conversions",
+        help="Rebuild every stored cashflow conversion with the configured basis",
+    )
+    recalculate.add_argument(
+        "--venue", action="append", choices=["binance", "gate", "mexc"]
+    )
+    recalculate.add_argument("--json", action="store_true", help="Emit JSON")
 
     weekly = subparsers.add_parser(
         "weekly-collect",
@@ -269,10 +279,17 @@ def run(argv: list[str] | None = None) -> int:
                 actions = BinanceArchiveCoordinator(config, store).backfill_step(
                     end_ms=int(datetime.now(tz=UTC).timestamp() * 1000)
                 )
+                conversion_sources = run_conversion_pass(
+                    config, store, venues={"binance"}
+                )
             payload = {
-                "ok": not any(action.status == "error" for action in actions),
+                "ok": not any(action.status == "error" for action in actions)
+                and not any(source.error for source in conversion_sources),
                 "status": "advanced",
                 "actions": [action.to_dict() for action in actions],
+                "conversion_sources": [
+                    source.to_dict() for source in conversion_sources
+                ],
             }
             _log_archive_actions(actions)
             _emit(payload, as_json=args.json)
@@ -333,9 +350,18 @@ def run(argv: list[str] | None = None) -> int:
                     actions = [action]
                 else:
                     parser.error(f"unknown archive command: {args.archive_command}")
+                conversion_sources = (
+                    run_conversion_pass(config, store, venues={"binance"})
+                    if args.archive_command in {"backfill-step", "poll", "import"}
+                    else []
+                )
             payload = {
-                "ok": not any(action.status == "error" for action in actions),
+                "ok": not any(action.status == "error" for action in actions)
+                and not any(source.error for source in conversion_sources),
                 "actions": [action.to_dict() for action in actions],
+                "conversion_sources": [
+                    source.to_dict() for source in conversion_sources
+                ],
             }
             _log_archive_actions(actions)
             _emit(payload, as_json=args.json)
@@ -344,6 +370,22 @@ def run(argv: list[str] | None = None) -> int:
             config = _load(args, require_credentials=False)
             _emit(DataStore(config.data_dir).summary(), as_json=args.json)
             return 0
+        if args.command == "recalculate-conversions":
+            config = _load(args, require_credentials=False)
+            store = DataStore(config.data_dir)
+            with _collector_lock(store.root / "state" / "collector.lock"):
+                sources = run_conversion_pass(
+                    config,
+                    store,
+                    venues=set(args.venue) if args.venue else None,
+                    recalculate=True,
+                )
+            payload = {
+                "ok": not any(source.error for source in sources),
+                "sources": [source.to_dict() for source in sources],
+            }
+            _emit(payload, as_json=args.json)
+            return 1 if not payload["ok"] else 0
         if args.command == "doctor":
             config = _load(args, require_credentials=False)
             _emit(_doctor(config), as_json=args.json)
@@ -380,8 +422,9 @@ def run(argv: list[str] | None = None) -> int:
         if args.command == "report":
             config = _load(args, require_credentials=False)
             group_by = [field.strip() for field in args.group_by.split(",") if field.strip()]
+            store = DataStore(config.data_dir)
             rows = pnl_report(
-                DataStore(config.data_dir),
+                store,
                 period=args.period,
                 group_by=group_by,
                 include_supplemental=args.include_supplemental,
@@ -390,6 +433,12 @@ def run(argv: list[str] | None = None) -> int:
                 end_ms=_time_arg(args.end) if args.end else None,
                 venues=set(args.venue) if args.venue else None,
                 symbols=set(args.symbol) if args.symbol else None,
+                conversion=StoredCashflowConversion(
+                    store,
+                    target_currency=config.reporting.target_currency,
+                    method=config.reporting.conversion_method,
+                    fixed_rates=config.reporting.fixed_rates,
+                ),
             )
             if args.json:
                 print(json.dumps(rows, indent=2, sort_keys=True))
@@ -429,6 +478,14 @@ def _config_summary(config: AppConfig) -> dict[str, Any]:
         "config": str(config.path),
         "secrets": str(config.secrets_path) if config.secrets_path else "process environment",
         "data_dir": str(config.data_dir),
+        "reporting": {
+            "target_currency": config.reporting.target_currency,
+            "conversion_method": config.reporting.conversion_method,
+            "fixed_rates": {
+                asset: str(rate)
+                for asset, rate in sorted(config.reporting.fixed_rates.items())
+            },
+        },
         "enabled_venues": [venue.name for venue in config.enabled_venues],
         "read_only_http": True,
     }

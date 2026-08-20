@@ -3,6 +3,8 @@ from decimal import Decimal
 import pytest
 
 from perp_trade_history.models import (
+    canonical_settlement_currency,
+    compact_base_symbol,
     decimal_text,
     infer_settlement_currency,
     stable_id,
@@ -34,4 +36,18 @@ def test_stable_identity_is_human_readable_and_unambiguous() -> None:
 def test_settlement_currency_inference_handles_common_contract_notation() -> None:
     assert infer_settlement_currency("ASSET_USDT") == "USDT"
     assert infer_settlement_currency("ASSET/USD:USD") == "USD"
+    assert infer_settlement_currency("ASSETBUSD") == "BUSD"
+    assert infer_settlement_currency("ASSETUSDT_230331") == "USDT"
     assert infer_settlement_currency("UNKNOWN", "eur") == "EUR"
+
+
+def test_settlement_currency_repair_prefers_a_longer_matching_quote() -> None:
+    assert canonical_settlement_currency("USD", "ASSETBUSD") == "BUSD"
+    assert canonical_settlement_currency("", "ASSETUSDT_230331") == "USDT"
+    assert canonical_settlement_currency("USD", "ASSETUSD") == "USD"
+
+
+def test_compact_base_symbol_removes_quote_and_delivery_suffixes() -> None:
+    assert compact_base_symbol("ASSET_USDT") == "ASSET"
+    assert compact_base_symbol("ASSETBUSD") == "ASSET"
+    assert compact_base_symbol("ASSETUSDT_230331") == "ASSET"

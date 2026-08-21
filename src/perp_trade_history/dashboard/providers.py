@@ -938,13 +938,47 @@ def _synthetic_episode_datetime(episode: Episode) -> datetime:
 
 
 def _apply_horizon(
-    points: tuple[PerformancePoint, ...], horizon: str, interval: str
+    points: tuple[PerformancePoint, ...], horizon: str, _interval: str
 ) -> tuple[PerformancePoint, ...]:
     years = {"1y": 1, "2y": 2, "3y": 3}.get(horizon)
     if not years:
         return points
-    periods_per_year = {"month": 12, "quarter": 4, "year": 1}.get(interval, 12)
-    return points[-(years * periods_per_year) :]
+    if not points:
+        return ()
+    latest_period = date.fromisoformat(points[-1].timestamp[:10])
+    boundary = date(latest_period.year - years, latest_period.month, 1)
+    visible = tuple(
+        point
+        for point in points
+        if date.fromisoformat(point.timestamp[:10]) > boundary
+    )
+    running = Decimal(0)
+    peak = Decimal(0)
+    recent: list[Decimal] = []
+    rebased = [
+        PerformancePoint(
+            f"{boundary.isoformat()}T00:00:00",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+    ]
+    for point in visible:
+        amount = Decimal(str(point.period))
+        running += amount
+        peak = max(peak, running)
+        recent.append(amount)
+        rebased.append(
+            PerformancePoint(
+                point.timestamp,
+                float(running),
+                point.period,
+                float(sum(recent[-3:], Decimal(0))),
+                float(running - peak),
+            )
+        )
+    return tuple(rebased)
 
 
 def _aggregate_performance_points(

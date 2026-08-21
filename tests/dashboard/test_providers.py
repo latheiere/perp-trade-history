@@ -12,10 +12,11 @@ from perp_trade_history.analytics.schema import (
     FilterDimensions,
     NotableChange,
 )
-from perp_trade_history.dashboard.models import DashboardFilters
+from perp_trade_history.dashboard.models import DashboardFilters, PerformancePoint
 from perp_trade_history.dashboard.providers import (
     AnalyticsSnapshotProvider,
     SyntheticSnapshotProvider,
+    _apply_horizon,
     _cashflow_performance,
     _matches_analytics_episode,
 )
@@ -274,3 +275,54 @@ def test_performance_aggregation_rebuilds_period_rolling_and_drawdown_series() -
     assert [point.net for point in points] == [10.0, -4.0]
     assert [point.rolling for point in points] == [10.0, -4.0]
     assert [point.drawdown for point in points] == [0.0, -14.0]
+
+
+def test_filtered_performance_horizon_starts_at_zero_and_excludes_prior_periods() -> None:
+    points = tuple(
+        PerformancePoint(
+            f"2025-{month:02d}-01T00:00:00",
+            float(100 + month),
+            100.0 if month == 1 else 1.0,
+            102.0,
+            0.0,
+        )
+        for month in range(1, 13)
+    ) + (
+        PerformancePoint(
+            "2026-01-01T00:00:00",
+            112.0,
+            1.0,
+            3.0,
+            0.0,
+        ),
+    )
+
+    visible = _apply_horizon(points, "1y", "month")
+
+    assert visible[0] == PerformancePoint(
+        "2025-01-01T00:00:00",
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    assert [point.net for point in visible[:3]] == [0.0, 1.0, 2.0]
+    assert [point.rolling for point in visible[:4]] == [0.0, 1.0, 2.0, 3.0]
+    assert visible[-1].net == 12.0
+
+    sparse = _apply_horizon(
+        (
+            PerformancePoint("2024-01-01T00:00:00", 5.0, 5.0, 5.0, 0.0),
+            PerformancePoint("2025-01-01T00:00:00", 12.0, 7.0, 12.0, 0.0),
+            PerformancePoint("2026-01-01T00:00:00", 9.0, -3.0, 9.0, -3.0),
+        ),
+        "1y",
+        "month",
+    )
+
+    assert [point.timestamp for point in sparse] == [
+        "2025-01-01T00:00:00",
+        "2026-01-01T00:00:00",
+    ]
+    assert [point.net for point in sparse] == [0.0, -3.0]
+    assert [point.rolling for point in sparse] == [0.0, -3.0]

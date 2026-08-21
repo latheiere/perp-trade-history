@@ -34,6 +34,12 @@ profile, market-class, direction, duration, outcome, and timezone controls apply
 the retained episodes. Timezone selection also changes weekday and time-of-day
 grouping.
 
+Selecting a one-, two-, or three-year performance horizon uses a true calendar
+boundary from the latest displayed period, even when some periods have no activity.
+Cumulative, rolling, and drawdown views rebase to zero at that boundary. Rolling
+windows then use only periods inside the selected horizon; earlier results do not
+leak into the shortened view.
+
 Pattern cells and duration rows are coordinated filters. Selecting one focuses the
 episode ledger on the matching episodes; selecting an episode exposes its normalized
 executions and attributed cashflows without leaving the page.

@@ -768,9 +768,14 @@ def _execution_figure(items: Iterable[ExecutionDetail]) -> go.Figure:
         )
     )
     _style_figure(figure, height=190, margins={"l": 48, "r": 8, "t": 8, "b": 36})
+    price_range = _constant_price_range(
+        (price for _item, price in observed),
+        decimals=price_decimals,
+    )
     figure.update_yaxes(
         title_text="Execution price",
         tickformat=f",.{price_decimals}f",
+        range=price_range,
     )
     return figure
 
@@ -859,6 +864,19 @@ def _price_decimals(values: Iterable[float]) -> int:
     if smallest >= 0.0001:
         return 8
     return 10
+
+
+def _constant_price_range(
+    values: Iterable[float],
+    *,
+    decimals: int,
+) -> tuple[float, float] | None:
+    prices = list(values)
+    if not prices or min(prices) != max(prices):
+        return None
+    price = prices[0]
+    padding = max(abs(price) * 0.02, 5 * 10**-decimals)
+    return price - padding, price + padding
 
 
 def _quality_rows(items: Iterable) -> dmc.Stack:

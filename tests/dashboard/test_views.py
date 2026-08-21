@@ -9,6 +9,7 @@ from perp_trade_history.dashboard.models import (
 from perp_trade_history.dashboard.providers import SyntheticSnapshotProvider
 from perp_trade_history.dashboard.views import (
     _cashflow_figure,
+    _constant_price_range,
     _execution_figure,
     _price_decimals,
     collection_build_report,
@@ -116,6 +117,11 @@ def test_execution_price_chart_uses_visible_hover_and_magnitude_precision() -> N
     assert _price_decimals((1.25,)) == 4
     assert _price_decimals((0.021375,)) == 6
     assert _price_decimals((0.00021,)) == 8
+    assert _constant_price_range((0.00641, 0.00641), decimals=8) == (
+        0.0062818,
+        0.0065382,
+    )
+    assert _constant_price_range((0.00641, 0.00642), decimals=8) is None
 
 
 def test_exposure_rows_repeat_duration_labels_and_color_by_result() -> None:

@@ -233,7 +233,7 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
             rows,
             selected_rows,
             f"Showing 1–{min(20, len(rows))} of {len(rows):,}" if rows else "No matching episodes",
-            _pattern_label(pattern),
+            _pattern_label(pattern, direction, duration),
             data_quality_cards(snapshot.coverage, snapshot.build),
             collection_build_report(snapshot.coverage_gaps),
             f"All times shown in {snapshot.timezone}",
@@ -361,23 +361,32 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
-def _pattern_label(pattern: dict[str, Any] | None) -> str:
-    if not pattern or not pattern.get("source"):
-        return "No pattern focus"
-    if pattern.get("source") == "heatmap":
-        weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-        weekday = _optional_int(pattern.get("weekday"))
-        hour = _optional_int(pattern.get("hour_bucket"))
-        if weekday is not None and hour is not None and 0 <= weekday < len(weekdays):
-            return f"{weekdays[weekday]} · {hour:02d}:00–{(hour + 1) % 24:02d}:59"
-    labels = {
+def _pattern_label(
+    pattern: dict[str, Any] | None,
+    direction: str | None = None,
+    duration: str | None = None,
+) -> str:
+    duration_labels = {
         "under_1h": "Under 1 hour",
         "1h_to_1d": "1 hour – 1 day",
         "1d_to_7d": "1 – 7 days",
         "7d_to_30d": "7 – 30 days",
         "30d_or_more": "30 days or more",
     }
-    return labels.get(str(pattern.get("label") or ""), "Pattern focus")
+    if not pattern or not pattern.get("source"):
+        active_direction = direction if direction not in {None, "All directions"} else ""
+        active_duration = duration_labels.get(str(duration or ""), "")
+        active_filters = " · ".join(
+            value for value in (active_direction, active_duration) if value
+        )
+        return active_filters or "No pattern focus"
+    if pattern.get("source") == "heatmap":
+        weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        weekday = _optional_int(pattern.get("weekday"))
+        hour = _optional_int(pattern.get("hour_bucket"))
+        if weekday is not None and hour is not None and 0 <= weekday < len(weekdays):
+            return f"{weekdays[weekday]} · {hour:02d}:00–{(hour + 1) % 24:02d}:59"
+    return duration_labels.get(str(pattern.get("label") or ""), "Pattern focus")
 
 
 def _state_banner(

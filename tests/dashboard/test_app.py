@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from dash import no_update
 
-from perp_trade_history.dashboard.app import _pattern_drill, create_app
+from perp_trade_history.dashboard.app import _pattern_drill, _pattern_label, create_app
 from perp_trade_history.dashboard.cli import _browser_url, build_parser, main
 from perp_trade_history.dashboard.layout import EPISODE_COLUMNS, build_layout
 from perp_trade_history.dashboard.models import DashboardFilters, FilterOption
@@ -149,6 +149,19 @@ def test_pattern_drill_maps_heatmap_and_exposure_to_supported_filters() -> None:
     assert exposure == {"source": "exposure", "label": "1d_to_7d"}
     assert duration == "1d_to_7d"
     assert direction == "Short"
+
+
+def test_pattern_label_reflects_effective_episode_filters_during_drill_refresh() -> None:
+    assert _pattern_label(None, "Long", "under_1h") == "Long · Under 1 hour"
+    assert _pattern_label({}, "All directions", "all") == "No pattern focus"
+    assert (
+        _pattern_label(
+            {"source": "exposure", "label": "1d_to_7d"},
+            "Short",
+            "1d_to_7d",
+        )
+        == "1 – 7 days"
+    )
 
 
 def test_cli_supports_runtime_arguments_and_wildcard_browser_target(monkeypatch) -> None:

@@ -1,132 +1,179 @@
-# Dashboard and analytics
+# Using the dashboard
 
-## Intended outcome
+The dashboard turns collected account history into one scrollable report. Use it to
+compare periods, find recurring patterns, and inspect the executions and cashflows
+behind a result.
 
-The dashboard turns retained account history into a current, explorable analytical
-view. It is designed for histories where behavior and performance vary materially
-between periods, accounts, and market classes. The result is a scrollable report
-that supports both portfolio-level review and episode-level investigation.
+## Open the dashboard
 
-The page provides:
-
-1. Executive cashflow performance, episode outcomes, holding time, and notable changes
-2. Period, market-class, direction, weekday, time-of-day, and exposure analysis
-3. Comparable annual summaries
-4. A searchable episode ledger with execution and cashflow drill-down detail
-5. Source-coverage, episode-boundary, collection-gap, and refresh indicators
-
-## How the view adapts
-
-Available filter values, date bounds, year cards, comparison periods, episode rows,
-and quality states come from the current retained history. Newly collected records
-become visible automatically. A full rebuild is deterministic, so the same source
-boundary produces the same analytical snapshot.
-
-Interactive filters reuse the current in-memory analytical snapshot instead of
-re-reading and reconstructing unchanged history. Any canonical data-file revision
-invalidates that snapshot automatically, so newly collected records appear without
-manual cache management.
-
-Performance can be viewed as cumulative cashflow, period cashflow, a rolling
-three-period total, or absolute cashflow drawdown. Monthly, quarterly, and yearly
-aggregation rebuilds the period series rather than sampling a monthly curve. Date,
-profile, market-class, direction, duration, outcome, and timezone controls apply to
-the retained episodes. Timezone selection also changes weekday and time-of-day
-grouping.
-
-Selecting a one-, two-, or three-year performance horizon uses a true calendar
-boundary from the latest displayed period, even when some periods have no activity.
-Cumulative, rolling, and drawdown views rebase to zero at that boundary. Rolling
-windows then use only periods inside the selected horizon; earlier results do not
-leak into the shortened view.
-
-Pattern cells and duration rows are coordinated filters. Selecting one focuses the
-episode ledger on the matching episodes; selecting an episode exposes its normalized
-executions and attributed cashflows without leaving the page.
-
-Notable changes compare sufficiently populated calendar periods and show their
-sample sizes and direction. When there is not enough comparable evidence, the page
-shows an unavailable or low-confidence state instead of making a claim.
-
-The dashboard does not fit a machine-learning model. Deterministic reconstruction
-and transparent statistical comparisons remain explainable across materially
-different histories without training data, retraining, or model monitoring.
-
-## Analytical boundaries
-
-Position episodes are reconstructed from normalized execution transitions. Cashflow
-attribution prefers exact identifiers and uses temporal attribution only when one
-episode is a defensible match. Ambiguous or unassigned events remain visible in
-quality summaries.
-
-The analytical scope is deliberately limited to normalized trades and their
-attributable cashflows. The product does not display placeholders for measures that
-need a market-price path, portfolio-capital history, trade-plan risk, latency, or
-market depth. A future metric begins with a source-data extension; no unrelated
-value is substituted.
-
-Execution notional is shown only when the normalized trade provides notional or a
-defensible base-quantity and price basis. Missing contract economics remain
-unavailable for that execution rather than being estimated.
-
-## Coverage and the collection build report
-
-Source-history coverage and reconstructed episode boundaries are separate:
-
-- Source coverage asks whether the complete recorded collection intervals contain
-  the full observed episode interval.
-- Boundary completeness asks whether the retained executions establish both the
-  beginning and end of an episode.
-
-Neither is presented as trading performance. Both appear in Data quality. The
-collapsed collection build report lists merged uncovered trade intervals with the
-source profile, market class, inclusive start and end, recorded status, acquisition
-method, and the narrowest recorded limitation. When the collector did not record a
-reason, the report says so instead of inferring one.
-
-Gap discovery stays within reconstructed episode-domain intervals. It does not
-invent an expected-history start before observed activity. Adjacent gaps merge only
-when their profile, scope, status, reason, source, and acquisition method are
-equivalent.
-
-## Local use
-
-The shortest source-checkout flow is:
+From a source checkout, run:
 
 ```bash
-make bootstrap
+make dashboard
 ```
 
-Enable the required adapters in `config/config.toml` and add read-only credentials
-to `config/credentials.env`. Then load all currently available history and open the
-dashboard:
+This opens the dashboard using history already stored in the configured data
+directory. It does not need account credentials and does not collect new records.
+
+To collect history first and then open the page, run:
 
 ```bash
 make first-run
 ```
 
-Run `make history` to refresh the full available history without starting the page,
-or `make dashboard` to serve the current retained data without credentials.
-
-For visual evaluation without account data:
+For a demonstration without account data:
 
 ```bash
 .venv/bin/perp-trade-history-dashboard --synthetic
 ```
 
-## Supervised use
+## Start with the top filters
 
-A supervisor should bind the dashboard to a loopback address and disable automatic
-browser opening:
+The controls at the top apply to the whole dashboard:
+
+- **Profile** selects an account source.
+- **Market class** selects the available instrument category.
+- **Date range** limits episodes by their opening date.
+- **Aggregation interval** groups performance by month, quarter, or year.
+- **Timezone** changes displayed timestamps, weekday grouping, and time-of-day
+  grouping.
+
+Available choices and date boundaries come from collected history. If a selection
+contains no matching episodes, clear or widen the filters.
+
+## Read the executive overview
+
+The first row summarizes the current selection:
+
+- **Attributed cashflow** is the comparable trading cashflow assigned to closed
+  episodes in the configured reporting currency.
+- **Closed episodes** counts reconstructed positions with an observed end.
+- **Win rate** is the share of closed episodes with positive attributed cashflow.
+- **Median duration** is the median observed holding time of closed episodes.
+
+The performance chart offers four views:
+
+| View | What it shows |
+| --- | --- |
+| **Cumulative** | Running attributed cashflow from zero inside the selected horizon |
+| **Period** | Cashflow earned or lost in each displayed period |
+| **Rolling** | Sum of the latest three displayed periods |
+| **Drawdown** | Decline from the highest cumulative cashflow reached inside the horizon |
+
+Use **1Y**, **2Y**, **3Y**, or **All** to change the visible horizon. Shortened
+horizons start from zero and do not include earlier periods in cumulative or rolling
+values.
+
+**Notable changes** compares sufficiently populated recent periods. Each item shows
+the direction and number of episodes used. When the current selection does not
+contain enough comparable periods, the dashboard reports that directly.
+
+## Explore patterns
+
+### Weekday and hour
+
+The heatmap shows average comparable cashflow for episodes opened in each weekday
+and two-hour interval. Green cells are positive, red cells are negative, and color
+strength reflects the size of the average result.
+
+Select a cell to filter the episode ledger to that exact weekday and time interval.
+The active pattern appears above the ledger. Use **Clear pattern focus** to return to
+the broader selection.
+
+### Direction and exposure duration
+
+This section compares episode count and average result across direction and holding
+time. Colors describe outcome, not direction: green is positive and red is negative.
+
+Select any duration row under Long, Short, or Net to drill into the matching
+episodes. A Long or Short row also sets the direction filter.
+
+## Compare years
+
+Each annual card summarizes closed episodes for one calendar year in the selected
+timezone:
+
+- episode count;
+- attributed net cashflow;
+- win rate;
+- cashflow distribution; and
+- average observed holding time.
+
+Use the top filters to compare the same profile or market class across years.
+
+## Inspect episodes
+
+The episode ledger is the bridge between summary analytics and source evidence.
+You can:
+
+- filter by direction, duration, or outcome;
+- search by instrument, status, or quality tag;
+- sort and filter individual columns; and
+- select a row to open its details below the ledger.
+
+An episode is a reconstructed period of continuous exposure. It can contain many
+executions and several attributed cashflows.
+
+The detail tabs provide:
+
+- **Overview** — result, entry, exit, duration, direction, status, and tags;
+- **Executions** — execution-price timeline and the complete linked execution list;
+- **Cashflows** — attributed cashflow chart and the complete linked cashflow list;
+- **Quality** — boundary status, source coverage, execution count, and order count.
+
+Large execution and cashflow lists are virtualized, so scrolling remains responsive
+without omitting records.
+
+## Understand episode tags
+
+| Tag | What it means | What to keep in mind |
+| --- | --- | --- |
+| **Ambiguous Tie Order** | Opposing executions share the same timestamp and the source does not provide their sequence. | Episode boundaries and entry or exit allocation may depend on a stable fallback order. |
+| **Mixed Quantity Units** | Linked executions use different quantity units. | Quantity and exposure totals may not be directly comparable. |
+| **Left Censored** | A close was observed without the preceding opening inventory. | The true entry, opening time, and full duration are unavailable. |
+| **Right Censored** | The episode remains open at the latest analytical boundary. | Exit and final outcome are not yet available. |
+| **No Flags** | No episode-level reconstruction warning was detected. | Source coverage is still reported separately. |
+
+An episode can be both left- and right-censored when its opening is outside available
+history and it remains open at the latest boundary.
+
+## Check data quality
+
+Data quality appears at the bottom of the page so it does not obscure performance
+analysis.
+
+- **Source interval coverage** shows how many selected episode intervals are covered
+  by complete stored collection intervals.
+- **Reconstructed boundaries** shows how many episodes have an observed beginning
+  and end.
+- **Open episodes** and **left-censored episodes** explain incomplete boundaries.
+- **Latest build** shows when the dashboard last recognized a source-data change.
+
+Open the **Collection build report** to see exact uncovered intervals, their profile,
+market class, acquisition method, and recorded reason. It reports stored facts and
+does not guess why an unrecorded interval is missing.
+
+## Refresh the data
+
+Run the following command whenever you want to revisit all history currently
+available through the configured APIs:
 
 ```bash
-perp-trade-history-dashboard \
-  --config config/config.toml \
-  --host 127.0.0.1 \
-  --port 8050 \
-  --no-browser
+make history
 ```
 
-Readiness is exposed at `/readyz`. The dashboard is read-only and can run
-independently of collection. See [operations](operations.md) for collection,
-scheduling, backup, diagnostics, and durable-data guarantees.
+An open dashboard detects changed data files and refreshes automatically. Your
+filters remain interactive while unchanged analytical data is reused in memory.
+
+For older history outside ordinary API retention, follow the
+[historical archive guide](binance-archive-backfill.md).
+
+## What the calculations use
+
+The dashboard uses normalized executions and attributable trading cashflows. It does
+not predict performance or fit a machine-learning model. A metric appears only when
+the collected records provide the required inputs; unsupported estimates are not
+substituted.
+
+All dashboard activity is read-only. Opening the page, filtering, and drilling down
+cannot place or modify orders.

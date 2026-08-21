@@ -1,68 +1,71 @@
-# Currency conversion
+# Reporting-currency conversion
 
-Currency conversion is a post-collection pass, not report work. Normal collection,
-archive ingestion, and manual historical recalculation invoke the same conversion
-flow.
+The dashboard compares cashflows only after converting them into one reporting
+currency. Collection performs this conversion automatically and stores the result
+alongside the original cashflow.
 
-## Flow
+## Choose the reporting currency
 
-For each unconverted cashflow, the pass:
+Open `config/config.toml` and set:
 
-1. resolves the configured reporting currency and price selector;
-2. loads the required venue-native daily spot candle;
-3. stores the unique rate by venue, base currency, reporting currency, and UTC date;
-4. stores the converted amount by canonical cashflow record ID and conversion
-   specification.
+```toml
+[reporting]
+target_currency = "USDT"
+conversion_method = "previous_day.close"
+```
 
-The canonical cashflow schema does not contain rates or converted values. This keeps
-collection records stable while allowing conversion data to be rebuilt independently.
+`target_currency` is the unit used for dashboard performance and comparable text or
+JSON reports. Original cashflow amounts and currencies remain retained.
 
-## Price selectors
+## Choose the daily price
 
-| Selector | Price used for an event |
+| Setting | Daily price used for an event |
 | --- | --- |
-| `previous_day.open` | Previous UTC candle open |
-| `previous_day.close` | Previous UTC candle close |
-| `current_day.open` | Event-date UTC candle open |
-| `current_day.close` | Event-date UTC candle close |
+| `previous_day.open` | Previous UTC day's opening price |
+| `previous_day.close` | Previous UTC day's closing price |
+| `current_day.open` | Event UTC day's opening price |
+| `current_day.close` | Event UTC day's closing price |
 
-`previous_day.close` is the bootstrap default because the candle is complete for
-activity collected during the current UTC day. A current-day close is unavailable
-until its candle completes, so same-day conversion can fail when that selector is
-used.
+`previous_day.close` is the default and is the simplest choice for routine
+collection because the preceding daily candle is already complete. A current-day
+close cannot be used until that UTC day has finished.
 
-## Stored sidecars
+## Add a fixed fallback
 
-`normalized/conversion_rates.csv` stores one daily rate for each required conversion
-key. `normalized/cashflow_conversions.csv` stores converted amounts without expanding
-the canonical cashflow table.
-
-Reports validate the stored conversion specification and cashflow fingerprint before
-aggregation. They do not read the rate table directly and never call a market-data
-endpoint.
-
-## Fixed fallbacks
-
-A settlement asset without a usable public spot pair can use an explicit fixed rate:
+Some settlement currencies do not have a usable public spot pair. If you know the
+auditable fixed relationship that should be used, add it explicitly:
 
 ```toml
 [reporting.fixed_rates]
 INTERNAL_SETTLEMENT_ASSET = "1"
 ```
 
-The pass materializes the fixed value for each relevant UTC day in the rate table.
-Fixed fallbacks are part of the conversion specification, so adding or changing one
-requires recalculation.
+Use fixed rates only when that relationship is intentional. The configured value is
+applied to each relevant UTC day and becomes part of the stored conversion basis.
 
-## Historical recalculation
+## Apply a configuration change to existing history
 
-Changing `target_currency`, `conversion_method`, or a fixed fallback does not
-silently reinterpret stored values. Collection and reporting surface the stale
-specification. After reviewing the new configuration, rebuild conversions explicitly:
+Changing the target currency, daily price selector, or fixed fallback does not
+silently rewrite previous results. Recalculate after saving the new configuration:
 
 ```bash
-perp-trade-history --config config/config.toml recalculate-conversions
+.venv/bin/perp-trade-history \
+  --config config/config.toml \
+  recalculate-conversions
 ```
 
-The command uses public spot endpoints and does not require account credentials. Use
-`--venue` to bound the rebuild to one adapter.
+This uses public spot-price endpoints and does not require account credentials. Add
+`--venue` when you want to rebuild only one configured source.
+
+## Resolve unavailable comparable results
+
+If the dashboard can show an episode but cannot show a comparable result:
+
+1. Run `make history` to retry collection and conversion.
+2. Run `.venv/bin/perp-trade-history --config config/config.toml doctor`.
+3. Confirm that the event currency has a public conversion pair or an intentional
+   fixed fallback.
+4. Recalculate conversions if reporting settings changed after collection.
+
+The dashboard leaves a result unavailable when no defensible conversion exists. It
+does not replace the missing rate with an unrelated market price.

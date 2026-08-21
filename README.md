@@ -1,21 +1,23 @@
 # Perp Trade History
 
-A private trading analytics cockpit for long-term perpetual-account history.
-Headline PnL rarely explains what happened: strategies, exposure, and results change
-across years. Perp Trade History makes those changes explorable while keeping every
-conclusion connected to retained evidence—and never needs permission to trade.
+A private, read-only trading dashboard for exploring long-term perpetual-account
+history across venues and years.
 
-- One polished, scrollable report for performance, patterns, risk, and trades
-- Interactive comparisons across periods, market classes, directions, and exposure
-- Automatic updates as new history arrives
-- Trustworthy drill-downs, visible data quality, and auditable retained records
-- Local ownership with read-only account access
+Perp Trade History gives you:
+
+- A polished, scrollable dashboard for performance, patterns, and trade review
+- Filters for period, account profile, market class, direction, duration, and outcome
+- Weekday, time-of-day, exposure-duration, and annual comparisons
+- Drill-downs from a pattern to the exact episodes, executions, and cashflows
+- Automatic dashboard refresh when collected history changes
+- Visible source gaps and episode-quality warnings
+- Local storage and account credentials that never need trading permissions
 
 ## Quick start
 
 Python 3.11 or newer is required.
 
-1. Download and bootstrap.
+1. Download and prepare the application.
 
    ```bash
    git clone https://github.com/latheiere/perp-trade-history.git
@@ -23,56 +25,44 @@ Python 3.11 or newer is required.
    make bootstrap
    ```
 
-2. Enable the required adapters in `config/config.toml` and add read-only credentials
-   to `config/credentials.env`.
+2. Open `config/config.toml`, enable the venues you use, and add their read-only
+   credentials to `config/credentials.env`.
 
-3. Load available history and open the dashboard.
+3. Download available history and open the dashboard.
 
    ```bash
    make first-run
    ```
 
+The first run may take a while when an account has substantial history. Later runs
+update the same local dataset without duplicating records.
+
 Credentials need account and trade-history access only. Do not grant order,
 transfer, or withdrawal permissions.
 
-## Reporting
+## Everyday use
 
-Use the interactive dashboard for visual investigation and compact text or JSON
-reports for automation. Results remain comparable in the configured reporting
-currency, with incomplete source coverage visible rather than silently ignored.
-
-See [currency conversion](docs/conversion.md) for reporting-currency behavior.
-
-## Interactive analytics
-
-The dashboard highlights performance, changing patterns, reconstructed episodes,
-and data quality across materially different periods. It adapts as retained history
-grows and uses only analysis supported directly by retained trade evidence.
-
-See [dashboard and analytics](docs/dashboard.md) for the detailed analytical scope,
-metric boundaries, and service usage.
-
-## Configuration and data
-
-Portable configuration templates are provided in [`config`](config). Collected
-history remains local, auditable, and independent of the dashboard process.
-
-See [operations](docs/operations.md) for configuration, collection, diagnostics,
-storage guarantees, and deployment. See
-[historical archive coverage](docs/binance-archive-backfill.md) for extending the
-available source history.
-
-## Development
+Open the dashboard from already collected data:
 
 ```bash
-python -m pip install -e ".[dev]"
-python -m pytest
-ruff check .
+make dashboard
 ```
 
-When reporting a problem, include the command, sanitized error, Python version,
-affected adapter category, and source-history method. Never include credentials,
-signatures, signed URLs, or account identifiers.
+Refresh all history currently available through the configured APIs:
+
+```bash
+make history
+```
+
+The dashboard notices updated data automatically.
+
+## Learn more
+
+- [Use the dashboard](docs/dashboard.md)
+- [Refresh, diagnose, back up, and restore data](docs/operations.md)
+- [Extend older history with account archives](docs/binance-archive-backfill.md)
+- [Choose and rebuild the reporting currency](docs/conversion.md)
+- [Add optional unattended operation](docs/optional-extensions.md)
 
 ## License
 

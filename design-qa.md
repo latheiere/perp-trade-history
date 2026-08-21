@@ -1,57 +1,55 @@
-# Dashboard design QA
+# Maintainer dashboard design QA
 
-## Visual target
+This is an internal acceptance checklist for dashboard changes. User instructions
+belong in `README.md` and `docs/`.
 
-- Selected reference:
-  `/Users/akorotkevich/.codex/generated_images/01a0207e-a46d-73a3-8977-bf7083387cb3/exec-abdd9b36-3972-4ceb-8578-801fe1ea39b9.png`
-- Reference dimensions: 864 × 1821 pixels
-- Implementation viewport: 1440 × 1000 CSS pixels, with ordinary page scrolling
-- Combined top-section comparison:
-  `artifacts/design-qa/reference-vs-implementation-top.png`
+## Experience target
 
-## Visible comparison
+- Preserve an ordinary scrollable page instead of compressing every section into one
+  viewport.
+- Keep global filters compact and available before the analytical content.
+- Present executive performance, patterns, annual comparison, episode evidence, and
+  data quality in that reading order.
+- Use green and red for positive and negative outcomes; do not encode direction as
+  outcome.
+- Keep blue for interaction and selection.
+- Prefer readable spacing, restrained borders, and stable alignment over maximum
+  information density.
+- Keep the page usable at the supported desktop breakpoint and allow natural
+  stacking on narrower screens.
 
-The implementation follows the selected dark analytical visual system: compact
-sticky controls, a four-column KPI band, restrained borders and radii, green/red
-outcome accents, blue interaction accents, an 8/4 executive grid, a 4/8 pattern
-grid, six annual cards, an 8/4 ledger/detail grid, and a three-card quality footer.
-The page remains deliberately scrollable rather than compressing every analytical
-section into one viewport.
+## Interaction checks
 
-The implementation uses real Plotly and grid components rather than reproduced
-image assets. Synthetic values therefore differ from the visual target while panel
-hierarchy, density, alignment, typography, color, and interaction placement remain
-visually consistent.
+- Global filters update all affected sections and retain a clear selected state.
+- Performance horizons rebase cumulative, rolling, and drawdown views to the visible
+  boundary.
+- Heatmap cells and exposure-duration rows drill into matching episodes.
+- Clearing a pattern restores the broader episode selection.
+- Episode search, column filters, sorting, pagination, and row selection remain
+  responsive.
+- High-activity episodes do not mount unbounded evidence rows or inactive charts.
+- Execution and cashflow tabs expose every linked record through virtualized grids.
+- Empty, unavailable, low-confidence, open, and censored states use explicit wording.
+- Price axes and hover values retain precision appropriate to magnitude.
+- Hover labels remain legible against the dark background.
 
-## Interaction and state checks
+## Data checks
 
-- Period selection changes the checked horizon state.
-- Episode search filters the ledger and updates the selected detail panel.
-- Profile and market-class dimensions are independently available.
-- Synthetic history renders all designed visual states.
-- Retained local history renders populated multi-year, heatmap, exposure, episode,
-  notable-change, and data-quality sections.
-- Unsupported retained-data metrics show explicit unavailable states.
-- Readiness returns HTTP 200 at `/readyz`.
-- Fresh browser sessions report no warnings or errors.
+- Synthetic data renders every designed section without relying on a particular
+  retained history.
+- Retained local history renders multi-period performance, patterns, annual cards,
+  episodes, details, and quality states.
+- Filters and drill-downs preserve the exact selected episode set.
+- Only metrics supported by retained inputs appear.
+- Source coverage and episode-boundary completeness remain separate from performance.
+- The collection build report identifies exact stored coverage gaps without inferred
+  causes.
 
-## Fix history
+## Release checks
 
-1. Changed annual and episode grids to the ordinary desktop breakpoint so their
-   selected side-by-side layouts do not collapse prematurely.
-2. Added a dark grid scrollbar treatment to eliminate an inconsistent light strip.
-3. Added the active page size to the grid selector to remove component warnings.
-4. Deduplicated timezone options when the source timezone is already UTC.
-5. Ordered retained-data episodes newest first, compacted long decimal display, and
-   shortened generated episode labels for readable drill-downs.
-6. Removed unsupported unit labels from real-data detail headings while retaining
-   synthetic unit-specific labels where the underlying values exist.
-
-## Evidence
-
-- `artifacts/design-qa/synthetic-dashboard-top.png`
-- `artifacts/design-qa/synthetic-dashboard-lower.png`
-- `artifacts/design-qa/synthetic-dashboard-quality-final.png`
-- `artifacts/design-qa/reference-vs-implementation-top.png`
-
-final result: passed
+- Run `python -m pytest` and `ruff check .`.
+- Confirm `/readyz` returns HTTP 200.
+- Check the dashboard at the supported desktop viewport and one narrower viewport.
+- Exercise a high-activity episode and each detail tab.
+- Confirm a fresh browser session has no warnings or errors.
+- Store new visual evidence under `artifacts/` only when it is needed for a review.

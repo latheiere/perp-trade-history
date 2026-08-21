@@ -55,6 +55,21 @@ def test_config_requires_credentials_only_for_enabled_venues(tmp_path: Path) -> 
     assert load_config(config_path, require_credentials=False).venues["mexc"].enabled
 
 
+def test_read_only_config_does_not_open_private_credential_file(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path)
+    missing_secrets = tmp_path / "credentials-not-mounted.env"
+
+    config = load_config(
+        config_path,
+        secrets_path=missing_secrets,
+        require_credentials=False,
+    )
+
+    assert config.secrets_path == missing_secrets.resolve()
+    assert config.venues["mexc"].api_key == ""
+
+
 def test_config_accepts_migrated_venue_credential_names(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     secrets_path = tmp_path / "secrets.env"

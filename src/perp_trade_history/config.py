@@ -129,7 +129,14 @@ def load_config(
         raise ConfigurationError("configuration schema_version must be 1")
 
     resolved_secrets = _resolve_optional_path(secrets_path or os.environ.get(SECRETS_ENV), path)
-    file_environment = load_env_file(resolved_secrets) if resolved_secrets else {}
+    # Read-only reporting and dashboard processes do not need credentials and
+    # must not fail merely because the private collection environment is
+    # unavailable to their process identity.
+    file_environment = (
+        load_env_file(resolved_secrets)
+        if resolved_secrets is not None and require_credentials
+        else {}
+    )
 
     storage = _mapping(payload, "storage")
     configured_data = os.environ.get(DATA_ENV) or storage.get("data_dir")

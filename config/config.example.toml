@@ -1,28 +1,25 @@
 schema_version = 1
 
 [storage]
-# PERP_TRADE_HISTORY_DATA_DIR overrides this value at runtime.
+# Local folder that will contain collected history and dashboard data.
+# PERP_TRADE_HISTORY_DATA_DIR can override it for a managed installation.
 data_dir = "data"
 
 [reporting]
-# Persisted on every converted cashflow. Changing either value requires the
-# explicit historical recalculation command before reports can run again.
+# Currency used to compare results in reports and the dashboard.
 target_currency = "USDT"
-# Supported selectors: previous_day.open, previous_day.close,
-# current_day.open, current_day.close. The previous completed close is the
-# safest default for records collected before the current UTC candle closes.
+# Daily conversion price. See docs/conversion.md before changing this value.
 conversion_method = "previous_day.close"
 
-# Optional auditable fallback for venue-internal assets without a public spot pair.
-# Fixed values are materialized per relevant UTC day in conversion_rates.csv.
+# Optional fixed conversion for a settlement currency without a public spot pair.
 [reporting.fixed_rates]
 # INTERNAL_SETTLEMENT_ASSET = "1"
 
 [collection]
-# Earliest required account history. The manual Binance archive backfill fixes this
-# as its lower boundary and persists progress toward it; recurring REST collection
-# never starts historical archive exports. See docs/binance-archive-backfill.md.
+# Earliest account history you want to load. Older history may require the manual
+# archive workflow described in docs/binance-archive-backfill.md.
 initial_start = "2017-01-01T00:00:00Z"
+# The remaining defaults balance safe retries with thorough history collection.
 overlap_hours = 72
 request_timeout_seconds = 30
 request_retries = 4
@@ -30,20 +27,21 @@ page_limit = 100
 max_pages_per_query = 50000
 
 [venues.binance]
+# Change to true when this account source should be collected.
 enabled = false
 account_id = "primary"
 base_url = "https://fapi.binance.com"
-# Optional public spot origin used for persisted daily conversion rates.
+# Public market-data endpoint used for reporting-currency conversion.
 spot_base_url = "https://api.binance.com"
-# Account history and open positions discover relevant contracts. Supplying known
-# historical symbols can include contracts absent from retained account activity.
+# Leave empty for automatic discovery, or list known historical symbols that may no
+# longer appear in current account activity.
 symbols = []
 discover_active_symbols = true
-# Prevent public catalog discovery from multiplying private history requests across
-# a large venue catalog. Raise only when intentionally querying every listed contract.
+# Leave this safety limit unchanged unless you intentionally query a larger catalog.
 max_public_discovery_symbols = 100
 
 [venues.gate]
+# Change to true when this account source should be collected.
 enabled = false
 account_id = "primary"
 base_url = "https://api.gateio.ws"
@@ -51,6 +49,7 @@ spot_base_url = "https://api.gateio.ws"
 settlements = ["usdt", "btc"]
 
 [venues.mexc]
+# Change to true when this account source should be collected.
 enabled = false
 account_id = "primary"
 base_url = "https://contract.mexc.com"

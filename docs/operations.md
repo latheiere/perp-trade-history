@@ -1,84 +1,170 @@
-# Operations
+# Operating Perp Trade History
 
-The core package supports interactive collection and reporting without a service
-manager, backup library, or private local module. The workflows below are optional.
+This guide covers the commands used after download: configuration checks, history
+refreshes, diagnostics, dashboard startup, backup, and restore.
 
-## Collection and coverage
+## Check the configuration
 
-The first successful collection backfills to the configured start or the oldest
-history exposed by each endpoint. Later runs overlap prior coverage and upsert changed
-records. `collect --full` revisits all currently reachable REST history without
-deleting stored data.
-
-Coverage is explicit. Missing, failed, symbol-scoped, and retention-limited intervals
-are not treated as complete. Primary signed cashflows are included in PnL by default;
-non-PnL transfers and supplemental summaries require explicit report flags.
-
-## Archive ingestion
-
-Supported asynchronous export datasets can extend history beyond REST retention.
-Historical backfill is operator-initiated and is not part of the recurring runtime
-workload:
+After editing `config/config.toml` or `config/credentials.env`, validate both files
+without making a network request:
 
 ```bash
-perp-trade-history --config config/config.toml archives backfill
-perp-trade-history --config config/config.toml archives status --json
+make check
 ```
 
-Archive polling and import invoke the same conversion pass as normal collection.
-Original files are retained with content-addressed names; signed download URLs are
-not persisted. See the [Binance archive backfill guide](binance-archive-backfill.md)
-for configuration, year-first behavior, quota handling, resumption, one-shot reruns,
-and manual recovery imports.
+Each enabled venue needs a read-only API key and secret in
+`config/credentials.env`. Credentials must allow account and trade-history access.
+Do not grant order, transfer, or withdrawal permissions.
 
-## Scheduling
+## Collect history
 
-`weekly-collect` exposes a persistent UTC schedule gate suitable for an external
-supervisor. It runs ordinary REST ingestion only. `runtime-contract.yaml` describes
-the optional recurring integration surface. Neither is required for manual commands.
-
-An overlapping singleton collection is reported as a successful skip because the
-active writer retains exclusive ownership of the data directory.
-
-## Backup and restore
-
-Signed backup commands require the optional backup dependency:
+Load all history currently available from enabled APIs:
 
 ```bash
-python -m pip install ".[backup]"
+make history
+```
 
-perp-trade-history --config config/config.toml backup \
+Use an ordinary incremental refresh when you only need newly available records:
+
+```bash
+.venv/bin/perp-trade-history \
+  --config config/config.toml \
+  --secrets config/credentials.env \
+  collect
+```
+
+Repeated collection updates existing records by their source identity and retains
+previously downloaded history.
+
+## Open the dashboard
+
+```bash
+make dashboard
+```
+
+The dashboard reads local data and opens in the default browser. It can remain open
+while collection runs; changed source files are detected automatically.
+
+See [using the dashboard](dashboard.md) for filters, drill-downs, metrics, and data
+quality.
+
+## Check collection status
+
+Show record counts and source coverage:
+
+```bash
+.venv/bin/perp-trade-history --config config/config.toml status
+```
+
+Use JSON output when another command or script will read the result:
+
+```bash
+.venv/bin/perp-trade-history --config config/config.toml status --json
+```
+
+Run the diagnostic check when collection, coverage, archive progress, or scheduling
+does not look right:
+
+```bash
+.venv/bin/perp-trade-history --config config/config.toml doctor
+```
+
+For detailed collection output:
+
+```bash
+.venv/bin/perp-trade-history --verbose \
+  --config config/config.toml \
+  --secrets config/credentials.env \
+  collect
+```
+
+Logs exclude credentials, signatures, and signed query strings. When sharing an
+error, still remove account identifiers and local private paths.
+
+## Extend history with archives
+
+Ordinary APIs may expose only a limited historical window. Where asynchronous
+account exports are supported, start or resume the historical backfill with:
+
+```bash
+.venv/bin/perp-trade-history \
+  --config config/config.toml \
+  --secrets config/credentials.env \
+  archives backfill
+```
+
+Check progress at any time:
+
+```bash
+.venv/bin/perp-trade-history --config config/config.toml archives status
+```
+
+Archive work is resumable and separate from ordinary refreshes. Follow the
+[historical archive guide](binance-archive-backfill.md) for initial boundaries,
+quota waits, one-shot reruns, and manual imports.
+
+## Change the reporting currency
+
+Edit the `[reporting]` section in `config/config.toml`, then rebuild stored
+conversions:
+
+```bash
+.venv/bin/perp-trade-history \
+  --config config/config.toml \
+  recalculate-conversions
+```
+
+See [currency conversion](conversion.md) before choosing a price selector or fixed
+fallback.
+
+## Back up collected data
+
+Install backup support once:
+
+```bash
+.venv/bin/python -m pip install ".[backup]"
+```
+
+Create and verify a signed backup:
+
+```bash
+.venv/bin/perp-trade-history --config config/config.toml backup \
   --output /path/to/history.tar.gz
-perp-trade-history verify-backup /path/to/history.tar.gz
 ```
 
-Restore is staging-first. Inspect the restored tree before replacing active data:
+Verify an existing backup without restoring it:
 
 ```bash
-perp-trade-history restore-backup /path/to/history.tar.gz \
+.venv/bin/perp-trade-history verify-backup /path/to/history.tar.gz
+```
+
+## Restore into a safe staging directory
+
+Restore never needs to overwrite the active data directory. Choose a new, empty
+staging directory:
+
+```bash
+.venv/bin/perp-trade-history restore-backup /path/to/history.tar.gz \
   --target /path/to/empty/staging-directory
 ```
 
-The package imports and all collection/report commands work when the backup extra is
-not installed.
+Inspect the restored data before deciding whether to use it as the configured data
+directory.
 
-## Diagnostics
+## Find the stored data
 
-```bash
-perp-trade-history --config config/config.toml status --json
-perp-trade-history --config config/config.toml doctor
-perp-trade-history --verbose --config config/config.toml collect
-```
+The `[storage]` section of `config/config.toml` sets the data directory. It contains:
 
-Routine logs go to standard output; warnings and errors go to standard error.
-Credentials, signatures, and signed query strings are excluded from logs and archive
-metadata.
+- retained source responses and imported archives;
+- normalized tables used by reports and the dashboard;
+- coverage, conversion, archive-progress, and scheduling state.
 
-## Storage guarantees
+Collection does not delete retained source records. Run only one collection writer
+against a data directory at a time; dashboards, reports, and status commands are
+read-only.
 
-Normalized tables use stable source identities so repeated collection and archive
-import are idempotent. Raw API and import records remain available for audit and
-renormalization. Collection does not delete canonical or retained source records.
+## Run without an interactive terminal
 
-Only one process should write a data directory at a time. Reports and status commands
-are read-only.
+Manual collection and dashboard commands are sufficient for normal local use. If
+you want unattended refreshes, a persistent local dashboard, or managed releases,
+continue with [optional extensions](optional-extensions.md).

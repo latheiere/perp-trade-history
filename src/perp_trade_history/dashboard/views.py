@@ -873,8 +873,8 @@ def _detail_table(headers: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> 
 
 def _number(value: str) -> float | None:
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        return float(value.replace(",", ""))
+    except (AttributeError, TypeError, ValueError):
         return None
 
 

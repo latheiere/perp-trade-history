@@ -16,6 +16,7 @@ from perp_trade_history.dashboard.views import (
     _cashflow_figure,
     _constant_price_range,
     _execution_figure,
+    _number,
     _price_decimals,
     collection_build_report,
     data_quality_cards,
@@ -135,11 +136,16 @@ def test_episode_detail_defers_inactive_panels_and_virtualizes_evidence_rows() -
 def test_execution_price_chart_uses_visible_hover_and_magnitude_precision() -> None:
     snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
     figure = _execution_figure(snapshot.episodes[0].executions)
+    formatted_execution = replace(snapshot.episodes[0].executions[0], price="3,664.75")
+    formatted_figure = _execution_figure((formatted_execution,))
 
     assert figure.layout.hoverlabel.font.color == "#f4f9fc"
     assert figure.layout.hoverlabel.bgcolor == "#102b3b"
     assert figure.layout.yaxis.tickformat in {",.2f", ",.4f", ",.6f", ",.8f", ",.10f"}
     assert "%{customdata[4]}" in figure.data[0].hovertemplate
+    assert list(formatted_figure.data[0].y) == [3664.75]
+    assert _number("3,664.75") == 3664.75
+    assert _number("Unavailable") is None
     assert _price_decimals((125.0,)) == 2
     assert _price_decimals((1.25,)) == 4
     assert _price_decimals((0.021375,)) == 6

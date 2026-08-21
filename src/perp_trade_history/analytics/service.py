@@ -9,10 +9,12 @@ from typing import Protocol
 from perp_trade_history.analytics.attribution import attribute_cashflows
 from perp_trade_history.analytics.changes import find_notable_changes
 from perp_trade_history.analytics.constants import TABLE_TIME_FIELDS, TRADING_CASHFLOW_TYPES
+from perp_trade_history.analytics.coverage import build_analytics_report
 from perp_trade_history.analytics.episodes import EpisodeBuilder, EpisodeBuildResult
 from perp_trade_history.analytics.profile import build_data_profile, profile_quality_flags
 from perp_trade_history.analytics.schema import (
     AccountCashflowSummary,
+    AnalyticsBuildReport,
     AnalyticsCapabilities,
     AnalyticsSnapshot,
     DataProfile,
@@ -75,15 +77,23 @@ def build_snapshot(
         unattributed=attribution.unattributed_primary_cashflows,
         ambiguous=attribution.ambiguous_primary_cashflows,
     )
+    exact_boundaries = _exact_episode_boundaries(profile, episode_result)
+    build_report = build_analytics_report(
+        episodes=episode_result.episodes,
+        coverage_rows=tables["coverage"],
+        reconstructed_boundaries_complete=exact_boundaries,
+    )
     capabilities = _capabilities(
         tables=tables,
         profile=profile,
         episode_result=episode_result,
         attribution_count=len(attribution.attributions),
+        build_report=build_report,
     )
     return AnalyticsSnapshot(
         as_of_ms=effective_as_of_ms,
         profile=profile,
+        build_report=build_report,
         capabilities=capabilities,
         quality_flags=quality_flags,
         episodes=episode_result.episodes,
@@ -137,20 +147,17 @@ def _capabilities(
     profile: DataProfile,
     episode_result: EpisodeBuildResult,
     attribution_count: int,
+    build_report: AnalyticsBuildReport,
 ) -> AnalyticsCapabilities:
     diagnostics = episode_result.diagnostics
     valid_executions = len(tables["executions"]) - diagnostics.skipped_invalid_executions
-    exact_boundaries = bool(episode_result.episodes) and not (
-        diagnostics.left_censored_episodes
-        or diagnostics.right_censored_episodes
-        or profile.opposing_tied_transition_groups
-        or diagnostics.unsupported_action_executions
-    )
+    exact_boundaries = build_report.reconstructed_episode_boundaries == "complete"
     notional_metrics = bool(valid_executions) and all(
         _has_notional_basis(row) for row in tables["executions"] if _valid_numeric_execution(row)
     )
-    coverage_complete = bool(episode_result.episodes) and all(
-        episode.coverage_status == "complete" for episode in episode_result.episodes
+    source_coverage_complete = build_report.source_trade_coverage == "complete"
+    reconstructed_boundaries_complete = (
+        build_report.reconstructed_episode_boundaries == "complete"
     )
     return AnalyticsCapabilities(
         episode_reconstruction=bool(valid_executions and episode_result.episodes),
@@ -168,9 +175,20 @@ def _capabilities(
             )
         ),
         notional_metrics=notional_metrics,
-        capital_return_metrics=False,
-        mark_to_market_metrics=False,
-        complete_coverage=coverage_complete,
+        complete_source_trade_coverage=source_coverage_complete,
+        complete_reconstructed_episode_boundaries=reconstructed_boundaries_complete,
+    )
+
+
+def _exact_episode_boundaries(
+    profile: DataProfile, episode_result: EpisodeBuildResult
+) -> bool:
+    diagnostics = episode_result.diagnostics
+    return bool(episode_result.episodes) and not (
+        diagnostics.left_censored_episodes
+        or diagnostics.right_censored_episodes
+        or profile.opposing_tied_transition_groups
+        or diagnostics.unsupported_action_executions
     )
 
 

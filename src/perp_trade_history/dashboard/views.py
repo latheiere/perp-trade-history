@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import asdict
 
 import dash_mantine_components as dmc
 import plotly.graph_objects as go
 from dash import dcc, html
-from plotly.subplots import make_subplots
 
 from perp_trade_history.dashboard.models import (
-    AttributionItem,
     BuildSummary,
+    CashflowDetail,
+    CoverageGap,
     CoverageSummary,
     DashboardSnapshot,
     Episode,
+    ExecutionDetail,
     ExposureBand,
     Kpi,
     NotableChange,
-    UnsupportedMetric,
     YearSummary,
 )
 
@@ -55,47 +54,43 @@ def kpi_cards(items: Iterable[Kpi]) -> list[dmc.Paper]:
     ]
 
 
-def performance_figure(snapshot: DashboardSnapshot) -> go.Figure:
+def performance_figure(snapshot: DashboardSnapshot, view: str = "cumulative") -> go.Figure:
     if not snapshot.performance:
         return empty_figure("No performance history matches the current filters")
+    fields = {
+        "cumulative": ("net", "Cumulative net result", COLORS["blue"]),
+        "period": ("period", "Period net result", COLORS["green"]),
+        "rolling": ("rolling", "Rolling net result", COLORS["blue"]),
+        "drawdown": ("drawdown", "Absolute drawdown", COLORS["red"]),
+    }
+    field, label, color = fields.get(view, fields["cumulative"])
     timestamps = [point.timestamp for point in snapshot.performance]
-    figure = make_subplots(specs=[[{"secondary_y": True}]])
-    figure.add_trace(
-        go.Scatter(
-            x=timestamps,
-            y=[point.net for point in snapshot.performance],
-            mode="lines",
-            name="Cumulative result",
-            line={"color": COLORS["blue"], "width": 2},
-            fill="tozeroy",
-            fillcolor="rgba(46, 168, 255, 0.12)",
-            hovertemplate="%{x|%b %Y}<br>Net %{y:,.0f}<extra></extra>",
-        ),
-        secondary_y=False,
-    )
-    if any(point.benchmark is not None for point in snapshot.performance):
+    values = [getattr(point, field) for point in snapshot.performance]
+    figure = go.Figure()
+    if view == "period":
         figure.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=timestamps,
-                y=[point.benchmark for point in snapshot.performance],
-                mode="lines",
-                name="Equity (Benchmark)",
-                line={"color": "#268bd2", "width": 1.4, "dash": "dash"},
-                hovertemplate="%{x|%b %Y}<br>Benchmark %{y:,.0f}<extra></extra>",
-            ),
-            secondary_y=False,
+                y=values,
+                name=label,
+                marker_color=[COLORS["green"] if value >= 0 else COLORS["red"] for value in values],
+                hovertemplate=f"%{{x|%b %Y}}<br>{label} %{{y:,.2f}}<extra></extra>",
+            )
         )
-    if any(point.drawdown is not None for point in snapshot.performance):
+    else:
         figure.add_trace(
             go.Scatter(
                 x=timestamps,
-                y=[point.drawdown for point in snapshot.performance],
+                y=values,
                 mode="lines",
-                name="Drawdown",
-                line={"color": COLORS["red"], "width": 1.5},
-                hovertemplate="%{x|%b %Y}<br>Drawdown %{y:.1f}%<extra></extra>",
-            ),
-            secondary_y=True,
+                name=label,
+                line={"color": color, "width": 2},
+                fill="tozeroy",
+                fillcolor=(
+                    "rgba(255, 87, 83, 0.10)" if view == "drawdown" else "rgba(46, 168, 255, 0.12)"
+                ),
+                hovertemplate=f"%{{x|%b %Y}}<br>{label} %{{y:,.2f}}<extra></extra>",
+            )
         )
     for regime in snapshot.regimes:
         figure.add_vrect(
@@ -123,22 +118,13 @@ def performance_figure(snapshot: DashboardSnapshot) -> go.Figure:
     _style_figure(figure, height=330, margins={"l": 54, "r": 54, "t": 52, "b": 38})
     figure.update_layout(
         hovermode="x unified",
-        legend={"orientation": "h", "x": 0, "y": 1.18, "font": {"size": 10}},
-        uirevision="performance-history",
+        uirevision=f"performance-{view}",
     )
     figure.update_yaxes(
-        tickprefix="$",
         tickformat="~s",
-        title_text="Cumulative result",
-        secondary_y=False,
+        title_text=f"{label} ({snapshot.currency})",
         zeroline=True,
         zerolinecolor=COLORS["border"],
-    )
-    figure.update_yaxes(
-        ticksuffix="%",
-        title_text="Drawdown",
-        range=[-45, 4],
-        secondary_y=True,
     )
     return figure
 
@@ -245,8 +231,8 @@ def notable_changes(items: Iterable[NotableChange]) -> list[dmc.Box]:
 
 def exposure_panel(
     items: Iterable[ExposureBand],
-    metric_label: str = "Avg R",
-    net_label: str = "Net R",
+    metric_label: str = "Average result",
+    net_label: str = "Net result",
 ) -> dmc.Box:
     rows = list(items)
     if not rows:
@@ -284,26 +270,38 @@ def _exposure_column(
                 justify="space-between",
             ),
             *[
-                dmc.Group(
-                    [
-                        dmc.Text(item.label, className="duration-label"),
-                        dmc.Text(str(getattr(item, f"{side}_count")), className="duration-count"),
-                        html.Div(
-                            html.Div(
-                                className=f"metric-bar-fill {side}",
-                                style={
-                                    "width": (
-                                        f"{getattr(item, f'{side}_count') / max_count * 100:.1f}%"
-                                    )
-                                },
+                dmc.UnstyledButton(
+                    dmc.Group(
+                        [
+                            dmc.Text(item.label, className="duration-label"),
+                            dmc.Text(
+                                str(getattr(item, f"{side}_count")),
+                                className="duration-count",
                             ),
-                            className="metric-bar",
-                        ),
-                        _optional_metric(getattr(item, f"{side}_average")),
-                    ],
-                    className="exposure-row",
-                    gap="xs",
-                    wrap="nowrap",
+                            html.Div(
+                                html.Div(
+                                    className=f"metric-bar-fill {side}",
+                                    style={
+                                        "width": _percent_width(
+                                            getattr(item, f"{side}_count"), max_count
+                                        )
+                                    },
+                                ),
+                                className="metric-bar",
+                            ),
+                            _optional_metric(getattr(item, f"{side}_average")),
+                        ],
+                        className="exposure-row",
+                        gap="xs",
+                        wrap="nowrap",
+                    ),
+                    id={
+                        "type": "exposure-drill",
+                        "value": item.filter_value,
+                        "side": side,
+                    },
+                    className="exposure-drill",
+                    **{"aria-label": f"Filter episodes to {item.label}, {title.lower()}"},
                 )
                 for item in rows
             ],
@@ -325,26 +323,35 @@ def _net_column(rows: list[ExposureBand], net_label: str) -> dmc.Box:
             dmc.Text("Net", className="exposure-heading"),
             dmc.Text(net_label, className="exposure-column-labels"),
             *[
-                dmc.Group(
-                    [
-                        html.Div(
+                dmc.UnstyledButton(
+                    dmc.Group(
+                        [
                             html.Div(
-                                className="metric-bar-fill net",
-                                style={
-                                    "width": (
-                                        f"{abs(item.net_average) / maximum * 100:.1f}%"
-                                        if item.net_average is not None
-                                        else "0%"
-                                    )
-                                },
+                                html.Div(
+                                    className="metric-bar-fill net",
+                                    style={
+                                        "width": (
+                                            f"{abs(item.net_average) / maximum * 100:.1f}%"
+                                            if item.net_average is not None
+                                            else "0%"
+                                        )
+                                    },
+                                ),
+                                className="metric-bar net-bar",
                             ),
-                            className="metric-bar net-bar",
-                        ),
-                        _optional_metric(item.net_average),
-                    ],
-                    className="exposure-row net-row",
-                    gap="sm",
-                    wrap="nowrap",
+                            _optional_metric(item.net_average),
+                        ],
+                        className="exposure-row net-row",
+                        gap="sm",
+                        wrap="nowrap",
+                    ),
+                    id={
+                        "type": "exposure-drill",
+                        "value": item.filter_value,
+                        "side": "net",
+                    },
+                    className="exposure-drill",
+                    **{"aria-label": f"Filter episodes to {item.label}"},
                 )
                 for item in rows
             ],
@@ -362,16 +369,19 @@ def _optional_metric(value: float | None) -> dmc.Text:
     )
 
 
+def _percent_width(value: int, maximum: int) -> str:
+    return f"{value / maximum * 100:.1f}%"
+
+
 def context_card(coverage: CoverageSummary, timezone: str) -> dmc.Paper:
-    coverage_state = "Complete" if coverage.percent >= 99.999 else "Partial"
     return dmc.Paper(
         [
-            panel_title("Context & coverage"),
+            panel_title("Context"),
             dmc.SimpleGrid(
                 [
                     _context_stat("Total episodes", f"{coverage.total:,}"),
-                    _context_stat("Coverage", f"{coverage.percent:.1f}%", coverage_state),
                     _context_stat("Date range", coverage.date_range),
+                    _context_stat("Timezone", timezone),
                 ],
                 cols={"base": 1, "xs": 3},
                 spacing="md",
@@ -416,18 +426,24 @@ def _year_card(item: YearSummary, currency: str) -> dmc.Paper:
         showarrow=False,
         font={"size": 11, "color": COLORS["text"]},
     )
+    bin_labels = (
+        ("< -100", "-100 – -25", "-25 – 0", "0 – 25", "25 – 100", "> 100")
+        if len(item.distribution) == 6
+        else tuple(f"Bin {index}" for index in range(1, len(item.distribution) + 1))
+    )
     distribution = go.Figure(
         go.Bar(
-            x=list(range(-5, 6)),
+            x=list(bin_labels),
             y=list(item.distribution),
-            marker_color=[COLORS["red"]] * 5 + ["#536979"] + [COLORS["green"]] * 5,
-            hoverinfo="skip",
+            marker_color=[
+                COLORS["red"] if index < len(item.distribution) / 2 else COLORS["green"]
+                for index in range(len(item.distribution))
+            ],
+            hovertemplate=f"%{{x}} {currency}<br>%{{y}} episodes<extra></extra>",
         )
     )
-    _style_figure(distribution, height=70, margins={"l": 0, "r": 0, "t": 0, "b": 13})
-    distribution.update_xaxes(
-        tickvals=[-5, 0, 5], ticktext=["-2R", "0", "+2R"], tickfont={"size": 7}
-    )
+    _style_figure(distribution, height=76, margins={"l": 0, "r": 0, "t": 2, "b": 28})
+    distribution.update_xaxes(tickfont={"size": 6}, showgrid=False)
     distribution.update_yaxes(visible=False)
     positive = item.net_result is not None and item.net_result >= 0
     return dmc.Paper(
@@ -454,11 +470,15 @@ def _year_card(item: YearSummary, currency: str) -> dmc.Paper:
             ),
             dmc.Text("Win rate", className="year-label"),
             dcc.Graph(figure=donut, config={"displayModeBar": False}, className="year-donut"),
-            dmc.Text("Result distribution (R)", className="year-label"),
+            dmc.Text("Cashflow distribution", className="year-label"),
             (
-                dcc.Graph(figure=distribution, config={"displayModeBar": False})
+                dcc.Graph(
+                    figure=distribution,
+                    config={"displayModeBar": False},
+                    className="year-distribution",
+                )
                 if item.distribution
-                else dmc.Text("Unavailable", className="micro-copy unavailable-metric")
+                else dmc.Text("No comparable cashflows", className="micro-copy")
             ),
             dmc.Text("Avg hold time", className="year-label"),
             dmc.Text(item.average_hold, className="year-hold"),
@@ -473,15 +493,18 @@ def episode_rows(episodes: Iterable[Episode]) -> list[dict[str, object]]:
         {
             "episode_id": episode.episode_id,
             "episode": episode.occurred_at,
+            "instrument": episode.instrument,
             "profile": episode.profile,
+            "market_class": episode.market_class,
             "direction": episode.direction,
+            "status": episode.status,
             "duration": episode.duration,
+            "duration_bucket": episode.duration_bucket,
             "entry": episode.entry,
             "exit": episode.exit,
-            "r_multiple": episode.r_multiple if episode.r_multiple is not None else "Unavailable",
-            "result": episode.outcome,
-            "mae": episode.mae if episode.mae is not None else "Unavailable",
-            "mfe": episode.mfe if episode.mfe is not None else "Unavailable",
+            "net_result": episode.net_result,
+            "currency": episode.result_currency,
+            "outcome": episode.outcome,
             "tags": " · ".join(episode.tags),
         }
         for episode in episodes
@@ -490,21 +513,7 @@ def episode_rows(episodes: Iterable[Episode]) -> list[dict[str, object]]:
 
 def episode_detail(episode: Episode | None) -> dmc.Box:
     if episode is None:
-        return empty_state("Select an episode to inspect its timeline and quality")
-    timeline = go.Figure(
-        go.Scatter(
-            x=list(episode.timeline_labels),
-            y=list(episode.timeline_values),
-            mode="lines+markers",
-            line={"color": COLORS["blue"], "width": 1.5, "shape": "hv"},
-            marker={"size": 4, "color": COLORS["blue"]},
-            fill="tozeroy",
-            fillcolor="rgba(46,168,255,0.08)",
-            hovertemplate="%{x}<br>%{y:+.2f}R<extra></extra>",
-        )
-    )
-    _style_figure(timeline, height=190, margins={"l": 38, "r": 8, "t": 12, "b": 28})
-    timeline.update_yaxes(ticksuffix="R")
+        return empty_state("Select an episode to inspect executions and cashflows")
     return dmc.Box(
         [
             dmc.Group(
@@ -514,29 +523,30 @@ def episode_detail(episode: Episode | None) -> dmc.Box:
                             dmc.Text(_episode_title(episode), className="detail-title"),
                             dmc.Text(
                                 (
-                                    f"{episode.occurred_at}  ·  {episode.profile}  ·  "
-                                    f"{episode.direction}"
+                                    f"{episode.instrument}  ·  {episode.profile}  ·  "
+                                    f"{episode.market_class}"
                                 ),
                                 className="micro-copy",
                             ),
                             dmc.Text(
-                                (
-                                    f"Duration {episode.duration}  ·  R multiple "
-                                    f"{episode.r_multiple:+.2f}"
-                                    if episode.r_multiple is not None
-                                    else f"Duration {episode.duration}  ·  R multiple unavailable"
-                                ),
+                                f"{episode.occurred_at}  ·  {episode.direction}  ·  "
+                                f"{episode.duration}",
                                 className="micro-copy",
                             ),
                         ]
                     ),
                     dmc.Badge(
-                        episode.outcome,
+                        episode.status,
+                        color="blue" if episode.status.lower() == "open" else "gray",
+                        variant="outline",
+                    ),
+                    dmc.Badge(
+                        _episode_result(episode),
                         color=(
                             "green"
-                            if episode.outcome == "Win"
+                            if episode.net_result is not None and episode.net_result > 0
                             else "red"
-                            if episode.outcome == "Loss"
+                            if episode.net_result is not None and episode.net_result < 0
                             else "gray"
                         ),
                         variant="light",
@@ -550,40 +560,73 @@ def episode_detail(episode: Episode | None) -> dmc.Box:
                     dmc.TabsList(
                         [
                             dmc.TabsTab("Overview", value="overview"),
-                            dmc.TabsTab("Execution", value="execution"),
-                            dmc.TabsTab("Notes", value="notes"),
-                            dmc.TabsTab("Tags", value="tags"),
+                            dmc.TabsTab(
+                                f"Executions ({len(episode.executions)})", value="executions"
+                            ),
+                            dmc.TabsTab(f"Cashflows ({len(episode.cashflows)})", value="cashflows"),
+                            dmc.TabsTab("Quality", value="quality"),
                         ]
                     ),
                     dmc.TabsPanel(
                         [
-                            dmc.Text(
-                                "Execution timeline (R)"
-                                if episode.timeline_values
-                                else "Execution timeline",
-                                className="detail-section-title",
+                            dmc.SimpleGrid(
+                                [
+                                    _detail_stat("Net result", _episode_result(episode)),
+                                    _detail_stat("Entry", episode.entry),
+                                    _detail_stat("Exit", episode.exit),
+                                    _detail_stat("Duration", episode.duration),
+                                    _detail_stat("Direction", episode.direction),
+                                    _detail_stat("Status", episode.status),
+                                ],
+                                cols={"base": 2, "sm": 3},
+                                spacing="sm",
                             ),
-                            (
+                            dmc.Text("Tags", className="detail-section-title"),
+                            dmc.Group(
+                                [dmc.Badge(tag, variant="outline") for tag in episode.tags],
+                                gap="xs",
+                            ),
+                        ],
+                        value="overview",
+                    ),
+                    dmc.TabsPanel(
+                        (
+                            [
+                                dmc.Text(
+                                    "Execution price timeline",
+                                    className="detail-section-title",
+                                ),
                                 dcc.Graph(
-                                    figure=timeline,
+                                    figure=_execution_figure(episode.executions),
                                     config={"displayModeBar": False, "responsive": True},
-                                )
-                                if episode.timeline_values
-                                else empty_state(
-                                    "Timeline metrics are unavailable for this episode"
-                                )
-                            ),
-                            dmc.Text(
-                                "Cashflow attribution (R)"
-                                if episode.attribution
-                                else "Cashflow attribution",
-                                className="detail-section-title",
-                            ),
-                            (
-                                _attribution_rows(episode.attribution)
-                                if episode.attribution
-                                else empty_state("R attribution is unavailable for this episode")
-                            ),
+                                ),
+                                _execution_table(episode.executions),
+                            ]
+                            if episode.executions
+                            else empty_state("No execution rows are linked to this episode")
+                        ),
+                        value="executions",
+                    ),
+                    dmc.TabsPanel(
+                        (
+                            [
+                                dmc.Text(
+                                    "Reporting cashflows",
+                                    className="detail-section-title",
+                                ),
+                                dcc.Graph(
+                                    figure=_cashflow_figure(episode.cashflows),
+                                    config={"displayModeBar": False, "responsive": True},
+                                ),
+                                _cashflow_table(episode.cashflows),
+                            ]
+                            if episode.cashflows
+                            else empty_state("No attributed cashflows are linked to this episode")
+                        ),
+                        value="cashflows",
+                    ),
+                    dmc.TabsPanel(
+                        [
                             dmc.Text("Quality indicators", className="detail-section-title"),
                             _quality_rows(episode.quality),
                             dmc.Group(
@@ -591,28 +634,21 @@ def episode_detail(episode: Episode | None) -> dmc.Box:
                                     dmc.Text("Confidence", className="micro-copy"),
                                     dmc.Badge(
                                         episode.confidence,
-                                        color="green",
+                                        color=(
+                                            "yellow"
+                                            if episode.confidence.lower().startswith("low")
+                                            else "green"
+                                        ),
                                         variant="light",
                                         size="sm",
                                     ),
-                                    dmc.Text("Samples", className="micro-copy", ml="auto"),
+                                    dmc.Text("Executions", className="micro-copy", ml="auto"),
                                     dmc.Text(str(episode.samples), className="detail-value"),
                                 ],
                                 className="detail-footer",
                             ),
                         ],
-                        value="overview",
-                    ),
-                    dmc.TabsPanel(
-                        empty_state("Execution diagnostics are supplied by the analytics provider"),
-                        value="execution",
-                    ),
-                    dmc.TabsPanel(
-                        empty_state("No notes are attached to this episode"), value="notes"
-                    ),
-                    dmc.TabsPanel(
-                        dmc.Group([dmc.Badge(tag, variant="outline") for tag in episode.tags]),
-                        value="tags",
+                        value="quality",
                     ),
                 ],
                 value="overview",
@@ -632,36 +668,158 @@ def _episode_title(episode: Episode) -> str:
     return "Episode"
 
 
-def _attribution_rows(items: Iterable[AttributionItem]) -> dmc.Stack:
-    rows = list(items)
-    maximum = max((abs(item.value) for item in rows), default=1) or 1
-    total = sum(item.value for item in rows)
-    return dmc.Stack(
+def _episode_result(episode: Episode) -> str:
+    if episode.net_result is None:
+        return "Pending" if episode.status.lower() == "open" else "Not attributed"
+    return f"{episode.net_result:+,.2f} {episode.result_currency}".strip()
+
+
+def _detail_stat(label: str, value: str) -> dmc.Paper:
+    return dmc.Paper(
         [
-            *[
-                dmc.Group(
-                    [
-                        dmc.Text(item.label, className="attribution-label"),
-                        html.Div(
-                            html.Div(
-                                className="attribution-fill positive"
-                                if item.value >= 0
-                                else "attribution-fill negative",
-                                style={"width": f"{abs(item.value) / maximum * 100:.1f}%"},
-                            ),
-                            className="attribution-track",
-                        ),
-                        dmc.Text(f"{item.value:+.2f}R", className="attribution-value"),
-                    ],
-                    wrap="nowrap",
-                    gap="xs",
-                )
-                for item in rows
-            ],
-            dmc.Text(f"{total:+.2f}R", className="attribution-total"),
+            dmc.Text(label, className="quality-label"),
+            dmc.Text(value or "—", className="detail-stat-value"),
         ],
-        gap=5,
+        className="detail-stat",
     )
+
+
+def _execution_table(items: Iterable[ExecutionDetail]) -> object:
+    rows = list(items)
+    if not rows:
+        return empty_state("No execution rows are linked to this episode")
+    return _detail_table(
+        ("Time", "Transition", "Side", "Price", "Quantity", "Notional", "Fee", "Order"),
+        (
+            (
+                item.occurred_at,
+                item.transition,
+                item.side,
+                item.price,
+                f"{item.quantity} {item.quantity_unit}".strip(),
+                item.notional or "—",
+                f"{item.fee} {item.fee_currency}".strip() or "—",
+                item.order_id or "—",
+            )
+            for item in rows
+        ),
+    )
+
+
+def _execution_figure(items: Iterable[ExecutionDetail]) -> go.Figure:
+    rows = list(items)
+    observed = [(item, _number(item.price)) for item in rows]
+    observed = [(item, price) for item, price in observed if price is not None]
+    if not observed:
+        return empty_figure("Price values are absent from the linked execution rows", height=190)
+    figure = go.Figure(
+        go.Scatter(
+            x=[item.occurred_at for item, _price in observed],
+            y=[price for _item, price in observed],
+            mode="lines+markers",
+            line={"color": COLORS["blue"], "width": 1.4},
+            marker={
+                "size": 8,
+                "color": [
+                    COLORS["green"]
+                    if "open" in item.transition.lower()
+                    else COLORS["red"]
+                    if "close" in item.transition.lower()
+                    else COLORS["blue"]
+                    for item, _price in observed
+                ],
+                "symbol": [
+                    "triangle-up"
+                    if "open" in item.transition.lower()
+                    else "triangle-down"
+                    if "close" in item.transition.lower()
+                    else "circle"
+                    for item, _price in observed
+                ],
+            },
+            customdata=[
+                [item.transition, item.side, item.quantity, item.quantity_unit]
+                for item, _price in observed
+            ],
+            hovertemplate=(
+                "%{x}<br>Price %{y:,.8g}<br>%{customdata[0]} · %{customdata[1]}"
+                "<br>Quantity %{customdata[2]} %{customdata[3]}<extra></extra>"
+            ),
+        )
+    )
+    _style_figure(figure, height=190, margins={"l": 48, "r": 8, "t": 8, "b": 36})
+    figure.update_yaxes(title_text="Execution price")
+    return figure
+
+
+def _cashflow_table(items: Iterable[CashflowDetail]) -> object:
+    rows = list(items)
+    if not rows:
+        return empty_state("No attributed cashflows are linked to this episode")
+    return _detail_table(
+        ("Time", "Event", "Source amount", "Reporting amount", "Method"),
+        (
+            (
+                item.occurred_at,
+                item.event_type,
+                f"{item.amount} {item.currency}".strip(),
+                f"{item.reporting_amount} {item.reporting_currency}".strip(),
+                item.method,
+            )
+            for item in rows
+        ),
+    )
+
+
+def _cashflow_figure(items: Iterable[CashflowDetail]) -> go.Figure:
+    rows = list(items)
+    observed = [(item, _number(item.reporting_amount)) for item in rows]
+    observed = [(item, amount) for item, amount in observed if amount is not None]
+    if not observed:
+        return empty_figure(
+            "Reporting amounts are absent from the attributed cashflow rows",
+            height=190,
+        )
+    figure = go.Figure(
+        go.Bar(
+            x=[item.occurred_at for item, _amount in observed],
+            y=[amount for _item, amount in observed],
+            marker_color=[
+                COLORS["green"] if amount >= 0 else COLORS["red"] for _item, amount in observed
+            ],
+            customdata=[
+                [item.event_type, item.reporting_currency, item.method]
+                for item, _amount in observed
+            ],
+            hovertemplate=(
+                "%{x}<br>%{customdata[0]} %{y:,.2f} %{customdata[1]}"
+                "<br>%{customdata[2]}<extra></extra>"
+            ),
+        )
+    )
+    _style_figure(figure, height=190, margins={"l": 48, "r": 8, "t": 8, "b": 36})
+    figure.update_yaxes(title_text="Reporting amount")
+    return figure
+
+
+def _detail_table(headers: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> html.Div:
+    return html.Div(
+        html.Table(
+            [
+                html.Thead(html.Tr([html.Th(header) for header in headers])),
+                html.Tbody([html.Tr([html.Td(value) for value in row]) for row in rows]),
+            ],
+            className="detail-data-table",
+        ),
+        className="detail-table-scroll",
+    )
+
+
+def _number(value: str) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _quality_rows(items: Iterable) -> dmc.Stack:
@@ -684,14 +842,13 @@ def _quality_rows(items: Iterable) -> dmc.Stack:
 
 def data_quality_cards(
     coverage: CoverageSummary,
-    unsupported: Iterable[UnsupportedMetric],
     build: BuildSummary,
 ) -> list[dmc.Paper]:
     complete = coverage.percent >= 99.999
     return [
         dmc.Paper(
             [
-                panel_title("Coverage"),
+                panel_title("Source interval coverage"),
                 dmc.Group(
                     [
                         dmc.Text(f"{coverage.percent:.1f}%", className="quality-hero positive"),
@@ -703,7 +860,7 @@ def data_quality_cards(
                     ],
                     align="center",
                 ),
-                dmc.Text("Episodes with complete data", className="quality-copy"),
+                dmc.Text("Observed source intervals marked complete", className="quality-copy"),
                 dmc.Text(f"{coverage.complete:,} / {coverage.total:,}", className="quality-ratio"),
                 dmc.Progress(value=coverage.percent, color="green", size="sm", mt="lg"),
             ],
@@ -711,27 +868,24 @@ def data_quality_cards(
         ),
         dmc.Paper(
             [
-                panel_title("Unsupported metrics"),
-                dmc.Text(
-                    "Some metrics are not supported for all episodes.", className="quality-copy"
-                ),
-                dmc.Stack(
+                panel_title("Reconstructed boundaries"),
+                dmc.Group(
                     [
-                        dmc.Group(
-                            [
-                                dmc.Text(item.label, className="quality-label"),
-                                dmc.Text(
-                                    f"{item.percent:.1f}%"
-                                    if item.percent is not None
-                                    else "Unavailable",
-                                    className="detail-value unavailable-metric",
-                                ),
-                            ],
-                            justify="space-between",
-                        )
-                        for item in unsupported
+                        dmc.Text(
+                            f"{coverage.boundary_complete:,}",
+                            className="quality-hero tone-info",
+                        ),
+                        dmc.Badge("Closed and complete", color="blue", variant="light"),
                     ],
-                    gap=8,
+                    align="center",
+                ),
+                dmc.SimpleGrid(
+                    [
+                        _context_stat("Open episodes", f"{coverage.open_episodes:,}"),
+                        _context_stat("Left-censored", f"{coverage.left_censored:,}"),
+                    ],
+                    cols=2,
+                    spacing="sm",
                     mt="md",
                 ),
             ],
@@ -758,6 +912,55 @@ def data_quality_cards(
     ]
 
 
+def collection_build_report(gaps: Iterable[CoverageGap]) -> dmc.Accordion:
+    rows = list(gaps)
+    content: object
+    if rows:
+        content = _detail_table(
+            ("Profile", "Market class", "Start", "End", "Status", "Reason", "Source"),
+            (
+                (
+                    item.profile,
+                    item.market_class,
+                    item.start,
+                    item.end,
+                    item.status,
+                    item.reason,
+                    item.source,
+                )
+                for item in rows
+            ),
+        )
+    else:
+        content = dmc.Text(
+            "No exact source-coverage gaps are reported for the current selection.",
+            className="quality-copy",
+        )
+    return dmc.Accordion(
+        dmc.AccordionItem(
+            [
+                dmc.AccordionControl(
+                    dmc.Group(
+                        [
+                            dmc.Text("Collection build report", className="panel-title"),
+                            dmc.Badge(
+                                f"{len(rows):,} gaps" if rows else "No gaps",
+                                color="yellow" if rows else "green",
+                                variant="light",
+                            ),
+                        ],
+                        gap="sm",
+                    )
+                ),
+                dmc.AccordionPanel(content),
+            ],
+            value="collection-build-report",
+        ),
+        value=None,
+        className="collection-report panel",
+    )
+
+
 def _build_row(label: str, value: str) -> dmc.Group:
     return dmc.Group(
         [dmc.Text(label, className="quality-label"), dmc.Text(value, className="quality-copy")],
@@ -767,13 +970,13 @@ def _build_row(label: str, value: str) -> dmc.Group:
     )
 
 
-def panel_title(title: str, action: str | None = None) -> dmc.Group:
-    children: list = [dmc.Text(title, className="panel-title")]
-    if action:
-        children.append(
-            dmc.Button(action, variant="subtle", size="compact-xs", className="panel-action")
-        )
-    return dmc.Group(children, justify="space-between", wrap="nowrap", className="panel-title-row")
+def panel_title(title: str) -> dmc.Group:
+    return dmc.Group(
+        dmc.Text(title, className="panel-title"),
+        justify="space-between",
+        wrap="nowrap",
+        className="panel-title-row",
+    )
 
 
 def section_heading(number: int, title: str) -> dmc.Group:
@@ -848,7 +1051,3 @@ def _money(value: float) -> str:
 
 def _badge_color(tone: str) -> str:
     return {"positive": "green", "negative": "red", "info": "blue"}.get(tone, "gray")
-
-
-def episode_asdict(episode: Episode) -> dict:
-    return asdict(episode)

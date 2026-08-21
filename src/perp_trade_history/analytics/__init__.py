@@ -1,8 +1,10 @@
 from perp_trade_history.analytics.schema import (
     AccountCashflowSummary,
+    AnalyticsBuildReport,
     AnalyticsCapabilities,
     AnalyticsSnapshot,
     CashflowAttribution,
+    CoverageGap,
     DataProfile,
     EpisodeCashflowSummary,
     EpisodeExecutionLink,
@@ -15,11 +17,13 @@ from perp_trade_history.analytics.service import CashflowConversion, build_snaps
 
 __all__ = [
     "AccountCashflowSummary",
+    "AnalyticsBuildReport",
     "AnalyticsCapabilities",
     "AnalyticsSnapshot",
     "CashflowAttribution",
     "CashflowConversion",
     "DataProfile",
+    "CoverageGap",
     "EpisodeCashflowSummary",
     "EpisodeExecutionLink",
     "EpisodeRow",

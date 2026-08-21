@@ -12,6 +12,12 @@ class DashboardFilters:
     market_class: str = "all"
     interval: str = "month"
     horizon: str = "all"
+    start_date: str = ""
+    end_date: str = ""
+    timezone: str = "UTC"
+    performance_view: str = "cumulative"
+    weekday: int | None = None
+    hour_bucket: int | None = None
     direction: str = "all"
     duration: str = "all"
     outcome: str = "all"
@@ -37,8 +43,9 @@ class Kpi:
 class PerformancePoint:
     timestamp: str
     net: float
-    benchmark: float | None
-    drawdown: float | None
+    period: float
+    rolling: float
+    drawdown: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,14 +71,15 @@ class HeatmapData:
     hours: tuple[str, ...]
     weekdays: tuple[str, ...]
     values: tuple[tuple[float | None, ...], ...]
-    metric_label: str = "Performance by weekday & hour (average R per episode)"
-    unit: str = "R"
+    metric_label: str = "Performance by weekday & hour"
+    unit: str = "reporting amount"
     diverging: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ExposureBand:
     label: str
+    filter_value: str
     long_count: int
     long_average: float | None
     short_count: int
@@ -92,9 +100,28 @@ class YearSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class AttributionItem:
-    label: str
-    value: float
+class ExecutionDetail:
+    occurred_at: str
+    transition: str
+    side: str
+    price: str
+    quantity: str
+    quantity_unit: str
+    notional: str
+    fee: str
+    fee_currency: str
+    order_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CashflowDetail:
+    occurred_at: str
+    event_type: str
+    amount: str
+    currency: str
+    reporting_amount: str
+    reporting_currency: str
+    method: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,19 +137,19 @@ class Episode:
     occurred_at: str
     profile: str
     market_class: str
+    instrument: str
+    status: str
     direction: str
     duration: str
     duration_bucket: str
     entry: str
     exit: str
-    r_multiple: float | None
     outcome: str
-    mae: float | None
-    mfe: float | None
+    net_result: float | None
+    result_currency: str
     tags: tuple[str, ...]
-    timeline_labels: tuple[str, ...]
-    timeline_values: tuple[float, ...]
-    attribution: tuple[AttributionItem, ...]
+    executions: tuple[ExecutionDetail, ...]
+    cashflows: tuple[CashflowDetail, ...]
     quality: tuple[QualityIndicator, ...]
     confidence: str
     samples: int
@@ -134,12 +161,20 @@ class CoverageSummary:
     complete: int
     total: int
     date_range: str
+    boundary_complete: int = 0
+    open_episodes: int = 0
+    left_censored: int = 0
 
 
 @dataclass(frozen=True, slots=True)
-class UnsupportedMetric:
-    label: str
-    percent: float | None = None
+class CoverageGap:
+    profile: str
+    market_class: str
+    start: str
+    end: str
+    status: str
+    reason: str
+    source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +197,9 @@ class DashboardSnapshot:
     message: str = ""
     profiles: tuple[FilterOption, ...] = ()
     market_classes: tuple[FilterOption, ...] = ()
+    timezone_options: tuple[FilterOption, ...] = ()
+    date_start: str = ""
+    date_end: str = ""
     kpis: tuple[Kpi, ...] = ()
     performance: tuple[PerformancePoint, ...] = ()
     regimes: tuple[Regime, ...] = ()
@@ -170,14 +208,14 @@ class DashboardSnapshot:
         default_factory=lambda: HeatmapData(hours=(), weekdays=(), values=())
     )
     exposure: tuple[ExposureBand, ...] = ()
-    exposure_metric_label: str = "Avg R"
-    exposure_net_label: str = "Net R"
+    exposure_metric_label: str = "Average result"
+    exposure_net_label: str = "Net result"
     years: tuple[YearSummary, ...] = ()
     episodes: tuple[Episode, ...] = ()
     coverage: CoverageSummary = field(
         default_factory=lambda: CoverageSummary(0.0, 0, 0, "No available range")
     )
-    unsupported_metrics: tuple[UnsupportedMetric, ...] = ()
+    coverage_gaps: tuple[CoverageGap, ...] = ()
     build: BuildSummary = field(
         default_factory=lambda: BuildSummary("Unavailable", "—", "—", "—", "Unavailable")
     )

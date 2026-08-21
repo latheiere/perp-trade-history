@@ -4,11 +4,12 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from dash import no_update
 
-from perp_trade_history.dashboard.app import create_app
+from perp_trade_history.dashboard.app import _pattern_drill, create_app
 from perp_trade_history.dashboard.cli import _browser_url, build_parser, main
-from perp_trade_history.dashboard.layout import build_layout
-from perp_trade_history.dashboard.models import DashboardFilters
+from perp_trade_history.dashboard.layout import EPISODE_COLUMNS, build_layout
+from perp_trade_history.dashboard.models import DashboardFilters, FilterOption
 from perp_trade_history.dashboard.providers import SyntheticSnapshotProvider
 
 
@@ -37,6 +38,15 @@ def _find_component(component: object, identifier: str):
     return None
 
 
+def _text(component: object) -> str:
+    if isinstance(component, str):
+        return component
+    children = getattr(component, "children", None)
+    if isinstance(children, (list, tuple)):
+        return " ".join(_text(child) for child in children)
+    return _text(children) if children is not None else ""
+
+
 def test_app_factory_builds_all_adaptive_sections_and_ready_endpoint() -> None:
     app = create_app(refresh_interval_ms=1_000)
     ids = _component_ids(app.layout)
@@ -44,6 +54,10 @@ def test_app_factory_builds_all_adaptive_sections_and_ready_endpoint() -> None:
     assert {
         "snapshot-poll",
         "market-class-filter",
+        "date-range-filter",
+        "timezone-filter",
+        "performance-view-filter",
+        "pattern-filter",
         "kpi-grid",
         "performance-graph",
         "notable-changes",
@@ -52,11 +66,20 @@ def test_app_factory_builds_all_adaptive_sections_and_ready_endpoint() -> None:
         "episode-grid",
         "episode-detail",
         "data-quality-grid",
+        "collection-build-report",
     } <= ids
     response = app.server.test_client().get("/readyz")
     assert response.status_code == 200
     assert response.text == "OK"
-    assert len(app.callback_map) == 4
+    assert len(app.callback_map) == 6
+    callback_inputs = {
+        (item["id"], item["property"])
+        for callback in app.callback_map.values()
+        for item in callback["inputs"]
+    }
+    assert ("heatmap-graph", "clickData") in callback_inputs
+    assert ("date-range-filter", "start_date") in callback_inputs
+    assert ("performance-view-filter", "value") in callback_inputs
 
 
 def test_app_factory_rejects_excessive_refresh_frequency() -> None:
@@ -81,10 +104,51 @@ def test_app_factory_exposes_initial_provider_failure() -> None:
 
 def test_utc_source_timezone_is_not_duplicated_in_filter_options() -> None:
     snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
-    layout = build_layout(replace(snapshot, timezone="UTC"), refresh_interval_ms=5_000)
+    layout = build_layout(
+        replace(
+            snapshot,
+            timezone="UTC",
+            timezone_options=(FilterOption("UTC", "UTC"),),
+        ),
+        refresh_interval_ms=5_000,
+    )
     timezone = _find_component(layout, "timezone-filter")
 
-    assert timezone.data == ["UTC"]
+    assert timezone.data == [{"label": "UTC", "value": "UTC"}]
+
+
+def test_episode_grid_only_exposes_supported_economic_fields() -> None:
+    fields = {column["field"] for column in EPISODE_COLUMNS}
+
+    assert {"instrument", "status", "net_result", "currency", "outcome"} <= fields
+    assert not {"r_multiple", "mae", "mfe", "benchmark"} & fields
+    net_result = next(column for column in EPISODE_COLUMNS if column["field"] == "net_result")
+    assert set(net_result["cellClassRules"]) == {"positive-cell", "negative-cell"}
+
+    snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
+    layout = build_layout(snapshot, refresh_interval_ms=5_000)
+    outcome = _find_component(layout, "outcome-filter")
+    assert {"Win", "Loss", "Flat", "Open"} <= set(outcome.data)
+    rendered = _text(layout)
+    assert all(control not in rendered for control in ("Theme", "Settings", "Export", "View all"))
+
+
+def test_pattern_drill_maps_heatmap_and_exposure_to_supported_filters() -> None:
+    heatmap, duration, direction = _pattern_drill(
+        "heatmap-graph",
+        {"points": [{"x": "06", "y": "Thu"}]},
+    )
+    assert heatmap == {"source": "heatmap", "weekday": 3, "hour_bucket": 6}
+    assert duration is no_update
+    assert direction is no_update
+
+    exposure, duration, direction = _pattern_drill(
+        {"type": "exposure-drill", "value": "1d_to_7d", "side": "short"},
+        None,
+    )
+    assert exposure == {"source": "exposure", "label": "1d_to_7d"}
+    assert duration == "1d_to_7d"
+    assert direction == "Short"
 
 
 def test_cli_supports_runtime_arguments_and_wildcard_browser_target(monkeypatch) -> None:

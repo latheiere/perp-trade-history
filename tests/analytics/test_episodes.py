@@ -126,4 +126,5 @@ def test_opposing_tied_transitions_are_deterministic_and_diagnosed(tmp_path: Pat
     assert forward.episodes == reverse.episodes
     assert forward.execution_links == reverse.execution_links
     assert forward.profile.opposing_tied_transition_groups == 1
+    assert forward.build_report.reconstructed_episode_boundaries == "incomplete"
     assert any(flag.code == "opposing_tied_transitions" for flag in forward.quality_flags)

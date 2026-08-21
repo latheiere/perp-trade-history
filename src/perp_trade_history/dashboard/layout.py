@@ -6,6 +6,7 @@ from dash import dcc
 
 from perp_trade_history.dashboard.models import DashboardSnapshot
 from perp_trade_history.dashboard.views import (
+    collection_build_report,
     context_card,
     data_quality_cards,
     episode_detail,
@@ -22,15 +23,26 @@ from perp_trade_history.dashboard.views import (
 
 EPISODE_COLUMNS = [
     {"field": "episode", "headerName": "Episode", "minWidth": 150, "pinned": "left"},
+    {"field": "instrument", "headerName": "Instrument", "minWidth": 130},
     {"field": "profile", "headerName": "Profile", "minWidth": 120},
+    {"field": "market_class", "headerName": "Market class", "minWidth": 110},
     {"field": "direction", "headerName": "Direction", "minWidth": 90},
+    {"field": "status", "headerName": "Status", "minWidth": 88},
     {"field": "duration", "headerName": "Duration", "minWidth": 95},
     {"field": "entry", "headerName": "Entry", "minWidth": 74},
     {"field": "exit", "headerName": "Exit", "minWidth": 74},
-    {"field": "r_multiple", "headerName": "R multiple", "minWidth": 105, "type": "numericColumn"},
-    {"field": "result", "headerName": "Result", "minWidth": 82},
-    {"field": "mae", "headerName": "MAE (R)", "minWidth": 90, "type": "numericColumn"},
-    {"field": "mfe", "headerName": "MFE (R)", "minWidth": 90, "type": "numericColumn"},
+    {
+        "field": "net_result",
+        "headerName": "Net result",
+        "minWidth": 108,
+        "type": "numericColumn",
+        "cellClassRules": {
+            "positive-cell": "params.value > 0",
+            "negative-cell": "params.value < 0",
+        },
+    },
+    {"field": "currency", "headerName": "Currency", "minWidth": 88},
+    {"field": "outcome", "headerName": "Outcome", "minWidth": 82},
     {"field": "tags", "headerName": "Tags", "minWidth": 170, "flex": 1},
 ]
 
@@ -58,6 +70,8 @@ def build_layout(snapshot: DashboardSnapshot, *, refresh_interval_ms: int) -> dm
                         "sequence": 0,
                     },
                 ),
+                dcc.Store(id="pattern-filter", data={}),
+                dcc.Store(id="drill-focus-sink"),
                 dcc.Interval(
                     id="snapshot-poll",
                     interval=refresh_interval_ms,
@@ -79,6 +93,10 @@ def build_layout(snapshot: DashboardSnapshot, *, refresh_interval_ms: int) -> dm
                         _across_years(snapshot),
                         _episodes(snapshot, first_episode),
                         _data_quality(snapshot),
+                        dmc.Box(
+                            collection_build_report(snapshot.coverage_gaps),
+                            id="collection-build-report",
+                        ),
                         dmc.Text(
                             f"All times shown in {snapshot.timezone}",
                             id="footer-timezone",
@@ -104,11 +122,6 @@ def _command_bar(snapshot: DashboardSnapshot) -> dmc.Box:
     return dmc.Box(
         dmc.Group(
             [
-                dmc.Burger(
-                    size="sm",
-                    opened=False,
-                    **{"aria-label": "Open navigation"},
-                ),
                 dmc.Select(
                     id="profile-filter",
                     data=[
@@ -131,7 +144,16 @@ def _command_bar(snapshot: DashboardSnapshot) -> dmc.Box:
                     w=165,
                     **{"aria-label": "Market class"},
                 ),
-                dmc.Button(snapshot.date_range, variant="default", className="date-range-control"),
+                dcc.DatePickerRange(
+                    id="date-range-filter",
+                    start_date=snapshot.date_start or None,
+                    end_date=snapshot.date_end or None,
+                    min_date_allowed=snapshot.date_start or None,
+                    max_date_allowed=snapshot.date_end or None,
+                    display_format="MMM D, YYYY",
+                    clearable=False,
+                    className="date-range-control",
+                ),
                 dmc.Select(
                     id="interval-filter",
                     data=[
@@ -146,22 +168,17 @@ def _command_bar(snapshot: DashboardSnapshot) -> dmc.Box:
                 ),
                 dmc.Select(
                     id="timezone-filter",
-                    data=list(dict.fromkeys((snapshot.timezone, "UTC"))),
+                    data=[
+                        {"label": option.label, "value": option.value}
+                        for option in snapshot.timezone_options
+                    ]
+                    or [snapshot.timezone],
                     value=snapshot.timezone,
                     allowDeselect=False,
                     w=175,
                     **{"aria-label": "Timezone"},
                 ),
                 dmc.Text(snapshot.refreshed_label, id="refresh-status", className="refresh-status"),
-                dmc.Group(
-                    [
-                        dmc.Button("Theme", variant="subtle", size="compact-sm"),
-                        dmc.Button("Settings", variant="subtle", size="compact-sm"),
-                    ],
-                    gap="xs",
-                    ml="auto",
-                    className="utility-actions",
-                ),
             ],
             gap="sm",
             wrap="nowrap",
@@ -200,27 +217,22 @@ def _executive_overview(snapshot: DashboardSnapshot) -> dmc.Box:
                                         panel_title("Performance history"),
                                         dmc.Group(
                                             [
-                                                dmc.Select(
-                                                    id="benchmark-filter",
-                                                    data=(
-                                                        ["Compare to benchmark", "Net only"]
-                                                        if any(
-                                                            point.benchmark is not None
-                                                            for point in snapshot.performance
-                                                        )
-                                                        else ["Cumulative result only"]
-                                                    ),
-                                                    value=(
-                                                        "Compare to benchmark"
-                                                        if any(
-                                                            point.benchmark is not None
-                                                            for point in snapshot.performance
-                                                        )
-                                                        else "Cumulative result only"
-                                                    ),
-                                                    allowDeselect=False,
+                                                dmc.SegmentedControl(
+                                                    id="performance-view-filter",
+                                                    data=[
+                                                        {
+                                                            "label": "Cumulative",
+                                                            "value": "cumulative",
+                                                        },
+                                                        {"label": "Period", "value": "period"},
+                                                        {"label": "Rolling", "value": "rolling"},
+                                                        {
+                                                            "label": "Drawdown",
+                                                            "value": "drawdown",
+                                                        },
+                                                    ],
+                                                    value="cumulative",
                                                     size="xs",
-                                                    w=180,
                                                 ),
                                                 dmc.SegmentedControl(
                                                     id="horizon-filter",
@@ -246,11 +258,6 @@ def _executive_overview(snapshot: DashboardSnapshot) -> dmc.Box:
                                     figure=performance_figure(snapshot),
                                     config={"displayModeBar": False, "responsive": True},
                                 ),
-                                dmc.Text(
-                                    _coverage_caption(snapshot),
-                                    id="performance-caption",
-                                    className="coverage-caption",
-                                ),
                             ],
                             className="panel performance-panel",
                         ),
@@ -259,7 +266,7 @@ def _executive_overview(snapshot: DashboardSnapshot) -> dmc.Box:
                     dmc.GridCol(
                         dmc.Paper(
                             [
-                                panel_title("Notable changes", "View all"),
+                                panel_title("Notable changes"),
                                 dmc.Box(
                                     notable_changes(snapshot.notable_changes),
                                     id="notable-changes",
@@ -376,9 +383,14 @@ def _episodes(snapshot: DashboardSnapshot, selected: object) -> dmc.Box:
                                             id="duration-filter",
                                             data=[
                                                 {"label": "All durations", "value": "all"},
-                                                {"label": "Under 1 hour", "value": "short"},
-                                                {"label": "1 hour – 1 day", "value": "medium"},
-                                                {"label": "Over 1 day", "value": "long"},
+                                                {"label": "Under 1 hour", "value": "under_1h"},
+                                                {"label": "1 hour – 1 day", "value": "1h_to_1d"},
+                                                {"label": "1 – 7 days", "value": "1d_to_7d"},
+                                                {"label": "7 – 30 days", "value": "7d_to_30d"},
+                                                {
+                                                    "label": "30 days or more",
+                                                    "value": "30d_or_more",
+                                                },
                                             ],
                                             value="all",
                                             allowDeselect=False,
@@ -387,7 +399,7 @@ def _episodes(snapshot: DashboardSnapshot, selected: object) -> dmc.Box:
                                         ),
                                         dmc.Select(
                                             id="outcome-filter",
-                                            data=["All outcomes", "Win", "Loss"],
+                                            data=["All outcomes", "Win", "Loss", "Flat", "Open"],
                                             value="All outcomes",
                                             allowDeselect=False,
                                             size="xs",
@@ -399,12 +411,24 @@ def _episodes(snapshot: DashboardSnapshot, selected: object) -> dmc.Box:
                                             size="xs",
                                             className="episode-search",
                                         ),
+                                        dmc.Badge(
+                                            "No pattern focus",
+                                            id="pattern-focus-label",
+                                            color="gray",
+                                            variant="light",
+                                            className="pattern-focus-label",
+                                        ),
                                         dmc.Text(
                                             f"Showing 1–{min(20, len(rows))} of {len(rows):,}",
                                             id="episode-count",
                                             className="micro-copy episode-count",
                                         ),
-                                        dmc.Button("Export", variant="subtle", size="compact-xs"),
+                                        dmc.Button(
+                                            "Clear pattern focus",
+                                            id="clear-pattern-filter",
+                                            variant="subtle",
+                                            size="compact-xs",
+                                        ),
                                     ],
                                     gap="xs",
                                     className="episode-toolbar",
@@ -461,7 +485,7 @@ def _data_quality(snapshot: DashboardSnapshot) -> dmc.Box:
         [
             section_heading(5, "Data quality"),
             dmc.SimpleGrid(
-                data_quality_cards(snapshot.coverage, snapshot.unsupported_metrics, snapshot.build),
+                data_quality_cards(snapshot.coverage, snapshot.build),
                 id="data-quality-grid",
                 cols={"base": 1, "md": 3},
                 spacing="md",
@@ -469,9 +493,3 @@ def _data_quality(snapshot: DashboardSnapshot) -> dmc.Box:
         ],
         className="dashboard-section",
     )
-
-
-def _coverage_caption(snapshot: DashboardSnapshot) -> str:
-    if not snapshot.coverage.total:
-        return "Coverage unavailable"
-    return f"{snapshot.coverage.percent:.1f}% complete coverage"

@@ -44,9 +44,30 @@ class AnalyticsCapabilities:
     exact_execution_cashflow_attribution: bool
     temporal_cashflow_attribution: bool
     notional_metrics: bool
-    capital_return_metrics: bool
-    mark_to_market_metrics: bool
-    complete_coverage: bool
+    complete_source_trade_coverage: bool = False
+    complete_reconstructed_episode_boundaries: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageGap:
+    venue: str
+    account_id: str
+    market_type: str
+    dataset: str
+    scope: str
+    start_ms: int
+    end_ms: int
+    status: str
+    reason: str | None
+    source: str
+    acquisition: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsBuildReport:
+    source_trade_coverage: str
+    reconstructed_episode_boundaries: str
+    gaps: tuple[CoverageGap, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +202,7 @@ class NotableChange:
 class AnalyticsSnapshot:
     as_of_ms: int
     profile: DataProfile
+    build_report: AnalyticsBuildReport
     capabilities: AnalyticsCapabilities
     quality_flags: tuple[QualityFlag, ...]
     episodes: tuple[EpisodeRow, ...]

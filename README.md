@@ -47,7 +47,7 @@ See [currency conversion](docs/conversion.md) for reporting-currency behavior.
 
 The dashboard highlights performance, changing patterns, reconstructed episodes,
 and data quality across materially different periods. It adapts as retained history
-grows and clearly marks metrics that the available evidence cannot support.
+grows and uses only analysis supported directly by retained trade evidence.
 
 See [dashboard and analytics](docs/dashboard.md) for the detailed analytical scope,
 metric boundaries, and service usage.

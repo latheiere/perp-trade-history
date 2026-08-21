@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from perp_trade_history.analytics import AnalyticsSnapshot, build_snapshot
+from perp_trade_history.analytics.schema import CoverageGap as AnalyticsCoverageGap
 from perp_trade_history.analytics.schema import EpisodeRow
 from perp_trade_history.dashboard.models import (
-    AttributionItem,
     BuildSummary,
+    CashflowDetail,
+    CoverageGap,
     CoverageSummary,
     DashboardFilters,
     DashboardSnapshot,
     Episode,
+    ExecutionDetail,
     ExposureBand,
     FilterOption,
     HeatmapData,
@@ -22,8 +27,6 @@ from perp_trade_history.dashboard.models import (
     NotableChange,
     PerformancePoint,
     QualityIndicator,
-    Regime,
-    UnsupportedMetric,
     YearSummary,
 )
 from perp_trade_history.storage import DataStore
@@ -72,7 +75,16 @@ class AnalyticsSnapshotProvider:
             filters,
             revision=self.revision(),
             reporting_currency=self._reporting_currency,
+            execution_rows=_read_optional_table(self._store, "executions"),
+            cashflow_rows=_read_optional_table(self._store, "cashflows"),
         )
+
+
+def _read_optional_table(store: DataStore, name: str) -> list[dict[str, str]]:
+    try:
+        return store.tables[name].read()
+    except (OSError, ValueError):
+        return []
 
 
 def _adapt_analytics(
@@ -81,14 +93,17 @@ def _adapt_analytics(
     *,
     revision: str,
     reporting_currency: str,
+    execution_rows: list[dict[str, str]] | None = None,
+    cashflow_rows: list[dict[str, str]] | None = None,
 ) -> DashboardSnapshot:
+    zone = _timezone(filters.timezone)
     amounts = _episode_amounts(analytics, reporting_currency)
     selected = tuple(
         sorted(
             (
                 row
                 for row in analytics.episodes
-                if _matches_analytics_episode(row, filters, amounts)
+                if _matches_analytics_episode(row, filters, amounts, zone)
             ),
             key=lambda row: (row.opened_at_ms, row.episode_id),
             reverse=True,
@@ -96,7 +111,13 @@ def _adapt_analytics(
     )
     closed = tuple(row for row in selected if row.status == "closed")
     complete = sum(row.coverage_status == "complete" for row in selected)
-    date_range = _analytics_date_range(selected)
+    boundary_complete = sum(row.boundary_status == "complete" for row in selected)
+    open_episodes = sum(row.status == "open" for row in selected)
+    left_censored = sum(
+        row.boundary_status in {"left_censored", "both_censored"} for row in selected
+    )
+    date_range = _analytics_date_range(selected, zone)
+    date_start, date_end = _analytics_date_bounds(analytics.episodes, zone)
     profiles = (
         FilterOption("All profiles", "all"),
         *(
@@ -111,9 +132,9 @@ def _adapt_analytics(
             for value in analytics.dimensions.market_types
         ),
     )
-    performance = _cashflow_performance(closed, amounts)
-    years = _analytics_years(closed, amounts)
-    unfiltered = filters == DashboardFilters(interval=filters.interval, horizon=filters.horizon)
+    performance = _cashflow_performance(closed, amounts, filters.interval, zone)
+    years = _analytics_years(closed, amounts, zone)
+    unfiltered = _is_baseline_filter(filters, date_start, date_end)
     notable = (
         tuple(
             _analytics_notable(index, item)
@@ -127,31 +148,43 @@ def _adapt_analytics(
     snapshot = DashboardSnapshot(
         revision=revision,
         refreshed_label=f"Source data through {refreshed}",
-        timezone="UTC",
+        timezone=zone.key,
         date_range=date_range,
         currency=reporting_currency,
         status="ready" if selected else "empty",
         message="" if selected else "No reconstructed episodes match the current selection.",
         profiles=profiles,
         market_classes=market_classes,
-        kpis=_analytics_kpis(selected, closed, complete, amounts, reporting_currency),
-        performance=_sample_performance(
-            _apply_horizon(performance, filters.horizon), filters.interval
-        ),
+        timezone_options=_timezone_options(zone.key),
+        date_start=date_start,
+        date_end=date_end,
+        kpis=_analytics_kpis(selected, closed, amounts, reporting_currency),
+        performance=_apply_horizon(performance, filters.horizon, filters.interval),
         notable_changes=notable,
-        heatmap=_analytics_heatmap(selected, amounts, reporting_currency),
+        heatmap=_analytics_heatmap(selected, amounts, reporting_currency, zone),
         exposure=_analytics_exposure(selected, amounts),
         exposure_metric_label=f"Avg {reporting_currency}",
         exposure_net_label=f"Avg {reporting_currency}",
         years=years,
-        episodes=tuple(_analytics_episode(row, amounts.get(row.episode_id)) for row in selected),
+        episodes=_analytics_episodes(
+            selected,
+            amounts,
+            analytics,
+            execution_rows or [],
+            cashflow_rows or [],
+            reporting_currency,
+            zone,
+        ),
         coverage=CoverageSummary(
             coverage_percent,
             complete,
             len(selected),
             date_range,
+            boundary_complete,
+            open_episodes,
+            left_censored,
         ),
-        unsupported_metrics=_unsupported_metrics(analytics),
+        coverage_gaps=_dashboard_coverage_gaps(analytics, filters, zone),
         build=BuildSummary(
             timestamp=refreshed,
             build_id=revision[:12],
@@ -181,6 +214,7 @@ def _matches_analytics_episode(
     row: EpisodeRow,
     filters: DashboardFilters,
     amounts: dict[str, Decimal],
+    zone: ZoneInfo,
 ) -> bool:
     if filters.profile != "all" and row.venue.lower() != filters.profile:
         return False
@@ -188,20 +222,41 @@ def _matches_analytics_episode(
         return False
     if filters.direction != "all" and row.direction.lower() != filters.direction:
         return False
-    mapped_duration = {
-        "short": {"under_1h"},
-        "medium": {"1h_to_1d"},
-        "long": {"1d_to_7d", "7d_to_30d", "30d_or_more"},
-    }
-    if filters.duration != "all" and row.duration_bucket not in mapped_duration[filters.duration]:
+    if filters.duration != "all" and row.duration_bucket != filters.duration:
+        return False
+    opened = datetime.fromtimestamp(row.opened_at_ms / 1000, tz=UTC).astimezone(zone)
+    if filters.start_date and opened.date() < _parse_date(filters.start_date):
+        return False
+    if filters.end_date and opened.date() > _parse_date(filters.end_date):
+        return False
+    if filters.weekday is not None and opened.weekday() != filters.weekday:
+        return False
+    if filters.hour_bucket is not None and (opened.hour // 2) * 2 != filters.hour_bucket:
         return False
     amount = amounts.get(row.episode_id)
-    outcome = "unavailable" if amount is None else "win" if amount > 0 else "loss"
+    outcome = (
+        "open"
+        if row.status == "open"
+        else "unavailable"
+        if amount is None
+        else "win"
+        if amount > 0
+        else "loss"
+        if amount < 0
+        else "flat"
+    )
     if filters.outcome != "all" and outcome != filters.outcome:
         return False
     query = filters.query.strip().lower()
     searchable = " ".join(
-        (row.episode_id, row.market_type, row.direction, row.status, *row.quality_flags)
+        (
+            row.episode_id,
+            row.symbol,
+            row.market_type,
+            row.direction,
+            row.status,
+            *row.quality_flags,
+        )
     ).lower()
     return not query or query in searchable
 
@@ -209,7 +264,6 @@ def _matches_analytics_episode(
 def _analytics_kpis(
     selected: tuple[EpisodeRow, ...],
     closed: tuple[EpisodeRow, ...],
-    complete: int,
     amounts: dict[str, Decimal],
     reporting_currency: str,
 ) -> tuple[Kpi, ...]:
@@ -217,7 +271,8 @@ def _analytics_kpis(
     total = sum(attributed, Decimal(0))
     durations = sorted(row.duration_ms for row in closed)
     median_duration = durations[len(durations) // 2] if durations else None
-    boundary_rate = (complete / len(selected) * 100) if selected else 0.0
+    wins = sum(amount > 0 for amount in attributed)
+    win_rate = wins / len(attributed) * 100 if attributed else None
     return (
         Kpi(
             "Attributed cashflow",
@@ -228,11 +283,11 @@ def _analytics_kpis(
         ),
         Kpi("Closed episodes", f"{len(closed):,}", "Observed", "Reconstructed", "info"),
         Kpi(
-            "Complete boundaries",
-            f"{boundary_rate:.1f}%",
-            f"{complete:,} episodes",
-            "Coverage status",
-            "positive" if boundary_rate == 100 else "info",
+            "Win rate",
+            f"{win_rate:.1f}%" if win_rate is not None else "Unavailable",
+            f"{wins:,} wins" if win_rate is not None else "No comparable outcomes",
+            f"{len(attributed):,} closed episodes" if attributed else "",
+            "positive" if win_rate is not None and win_rate >= 50 else "neutral",
         ),
         Kpi(
             "Median duration",
@@ -245,17 +300,34 @@ def _analytics_kpis(
 
 
 def _cashflow_performance(
-    closed: tuple[EpisodeRow, ...], amounts: dict[str, Decimal]
+    closed: tuple[EpisodeRow, ...],
+    amounts: dict[str, Decimal],
+    interval: str,
+    zone: ZoneInfo,
 ) -> tuple[PerformancePoint, ...]:
-    monthly: dict[str, Decimal] = defaultdict(Decimal)
+    periods: dict[date, Decimal] = defaultdict(Decimal)
     for row in closed:
         if row.closed_at_ms is not None and row.episode_id in amounts:
-            monthly[_format_timestamp(row.closed_at_ms, month=True)] += amounts[row.episode_id]
+            closed_at = datetime.fromtimestamp(row.closed_at_ms / 1000, tz=UTC).astimezone(zone)
+            periods[_period_start(closed_at.date(), interval)] += amounts[row.episode_id]
     running = Decimal(0)
+    peak = Decimal(0)
+    recent: list[Decimal] = []
     points: list[PerformancePoint] = []
-    for timestamp, amount in sorted(monthly.items()):
+    for period_start, amount in sorted(periods.items()):
         running += amount
-        points.append(PerformancePoint(timestamp, float(running), None, None))
+        peak = max(peak, running)
+        recent.append(amount)
+        rolling = sum(recent[-3:], Decimal(0))
+        points.append(
+            PerformancePoint(
+                f"{period_start.isoformat()}T00:00:00",
+                float(running),
+                float(amount),
+                float(rolling),
+                float(running - peak),
+            )
+        )
     return tuple(points)
 
 
@@ -293,6 +365,7 @@ def _analytics_heatmap(
     rows: tuple[EpisodeRow, ...],
     amounts: dict[str, Decimal],
     reporting_currency: str,
+    zone: ZoneInfo,
 ) -> HeatmapData:
     if not rows:
         return HeatmapData(hours=(), weekdays=(), values=())
@@ -301,7 +374,7 @@ def _analytics_heatmap(
     comparable = any(row.episode_id in amounts for row in rows)
     cells: dict[tuple[int, int], list[float]] = defaultdict(list)
     for row in rows:
-        opened = datetime.fromtimestamp(row.opened_at_ms / 1000, tz=UTC)
+        opened = datetime.fromtimestamp(row.opened_at_ms / 1000, tz=UTC).astimezone(zone)
         hour_index = opened.hour // 2
         if comparable:
             if row.episode_id in amounts:
@@ -367,6 +440,7 @@ def _exposure_band(
     net_values = [float(amounts[row.episode_id]) for row in matching if row.episode_id in amounts]
     return ExposureBand(
         label,
+        bucket,
         len(long_rows),
         _average(long_values),
         len(short_rows),
@@ -380,18 +454,35 @@ def _average(values: list[float]) -> float | None:
 
 
 def _analytics_years(
-    rows: tuple[EpisodeRow, ...], amounts: dict[str, Decimal]
+    rows: tuple[EpisodeRow, ...], amounts: dict[str, Decimal], zone: ZoneInfo
 ) -> tuple[YearSummary, ...]:
     grouped: dict[int, list[EpisodeRow]] = defaultdict(list)
     for row in rows:
-        if row.close_year is not None:
-            grouped[row.close_year].append(row)
+        if row.closed_at_ms is not None:
+            close_year = (
+                datetime.fromtimestamp(row.closed_at_ms / 1000, tz=UTC).astimezone(zone).year
+            )
+            grouped[close_year].append(row)
     cards: list[YearSummary] = []
     for year, episodes in sorted(grouped.items()):
         comparable = [amounts[row.episode_id] for row in episodes if row.episode_id in amounts]
         total = sum(comparable, Decimal(0)) if comparable else None
         win_rate = (
             sum(value > 0 for value in comparable) / len(comparable) * 100 if comparable else None
+        )
+        distribution = tuple(
+            sum(
+                lower <= float(value) < upper
+                for value in comparable
+            )
+            for lower, upper in (
+                (float("-inf"), -100.0),
+                (-100.0, -25.0),
+                (-25.0, 0.0),
+                (0.0, 25.0),
+                (25.0, 100.0),
+                (100.0, float("inf")),
+            )
         )
         average_ms = sum(row.duration_ms for row in episodes) // len(episodes)
         cards.append(
@@ -401,7 +492,7 @@ def _analytics_years(
                 float(total) if total is not None else None,
                 None,
                 win_rate,
-                (),
+                distribution,
                 _duration(average_ms),
                 "Net cashflow",
             )
@@ -409,57 +500,145 @@ def _analytics_years(
     return tuple(cards)
 
 
-def _analytics_episode(row: EpisodeRow, amount: Decimal | None) -> Episode:
-    occurred = _format_timestamp(row.opened_at_ms, include_time=True)
-    outcome = "Unavailable" if amount is None else "Win" if amount > 0 else "Loss"
+def _analytics_episodes(
+    rows: tuple[EpisodeRow, ...],
+    amounts: dict[str, Decimal],
+    analytics: AnalyticsSnapshot,
+    execution_rows: list[dict[str, str]],
+    cashflow_rows: list[dict[str, str]],
+    reporting_currency: str,
+    zone: ZoneInfo,
+) -> tuple[Episode, ...]:
+    executions_by_id = {row.get("record_id", ""): row for row in execution_rows}
+    execution_details: dict[str, list[ExecutionDetail]] = defaultdict(list)
+    for link in getattr(analytics, "execution_links", ()):
+        source = executions_by_id.get(link.execution_record_id)
+        if not source:
+            continue
+        execution_details[link.episode_id].append(
+            ExecutionDetail(
+                occurred_at=_row_timestamp(source, "event_time_ms", zone),
+                transition=link.transition.title(),
+                side=str(source.get("side") or "").title(),
+                price=_display_decimal(str(source.get("price") or "")),
+                quantity=_display_decimal(str(link.quantity or source.get("quantity") or "")),
+                quantity_unit=str(source.get("quantity_unit") or ""),
+                notional=_execution_notional(source),
+                fee=_display_decimal(str(source.get("fee") or "")),
+                fee_currency=str(source.get("fee_currency") or ""),
+                order_id=str(source.get("order_id") or ""),
+            )
+        )
+    cashflows_by_id = {row.get("record_id", ""): row for row in cashflow_rows}
+    cashflow_details: dict[str, list[CashflowDetail]] = defaultdict(list)
+    for item in getattr(analytics, "cashflow_attributions", ()):
+        source = cashflows_by_id.get(item.cashflow_record_id, {})
+        cashflow_details[item.episode_id].append(
+            CashflowDetail(
+                occurred_at=_row_timestamp(source, "event_time_ms", zone),
+                event_type=item.event_type.replace("_", " ").title(),
+                amount=item.amount,
+                currency=item.currency,
+                reporting_amount=item.reporting_amount,
+                reporting_currency=item.reporting_currency,
+                method=item.method.replace("_", " ").title(),
+            )
+        )
+    return tuple(
+        _analytics_episode(
+            row,
+            amounts.get(row.episode_id),
+            reporting_currency,
+            tuple(execution_details.get(row.episode_id, ())),
+            tuple(cashflow_details.get(row.episode_id, ())),
+            zone,
+        )
+        for row in rows
+    )
+
+
+def _analytics_episode(
+    row: EpisodeRow,
+    amount: Decimal | None,
+    reporting_currency: str,
+    executions: tuple[ExecutionDetail, ...],
+    cashflows: tuple[CashflowDetail, ...],
+    zone: ZoneInfo,
+) -> Episode:
+    occurred = _format_timestamp(row.opened_at_ms, include_time=True, zone=zone)
+    outcome = (
+        "Open"
+        if row.status == "open"
+        else "Unavailable"
+        if amount is None
+        else "Win"
+        if amount > 0
+        else "Loss"
+        if amount < 0
+        else "Flat"
+    )
+    exit_value = _display_decimal(row.exit_vwap)
+    if row.status == "open":
+        exit_value = f"Partial @ {exit_value}" if row.exit_vwap else "Open"
+    elif not row.exit_vwap:
+        exit_value = "Missing exit"
     return Episode(
         episode_id=row.episode_id,
         occurred_at=occurred,
         profile=row.venue.replace("_", " ").title(),
         market_class=row.market_type.replace("_", " ").title(),
+        instrument=row.symbol,
+        status=row.status.title(),
         direction=row.direction.title(),
         duration=_duration(row.duration_ms),
-        duration_bucket=(
-            "short"
-            if row.duration_bucket == "under_1h"
-            else "medium"
-            if row.duration_bucket == "1h_to_1d"
-            else "long"
-        ),
+        duration_bucket=row.duration_bucket,
         entry=_display_decimal(row.entry_vwap),
-        exit=_display_decimal(row.exit_vwap),
-        r_multiple=None,
+        exit=exit_value,
         outcome=outcome,
-        mae=None,
-        mfe=None,
+        net_result=float(amount) if amount is not None else None,
+        result_currency=reporting_currency if amount is not None else "",
         tags=tuple(flag.replace("_", " ").title() for flag in row.quality_flags) or ("No flags",),
-        timeline_labels=(),
-        timeline_values=(),
-        attribution=(),
+        executions=executions,
+        cashflows=cashflows,
         quality=(
             QualityIndicator("Boundary status", row.boundary_status.title()),
-            QualityIndicator("Coverage status", row.coverage_status.title()),
+            QualityIndicator("Source coverage", row.coverage_status.title()),
             QualityIndicator("Execution count", str(row.execution_count), "info"),
             QualityIndicator("Order count", str(row.order_count), "info"),
         ),
-        confidence="High" if row.boundary_status == "complete" else "Low",
+        confidence=(
+            "High"
+            if row.boundary_status == "complete" and row.coverage_status == "complete"
+            else "Low"
+        ),
         samples=row.execution_count,
     )
 
 
-def _analytics_date_range(rows: tuple[EpisodeRow, ...]) -> str:
+def _analytics_date_range(rows: tuple[EpisodeRow, ...], zone: ZoneInfo) -> str:
     if not rows:
         return "No available range"
     start = min(row.opened_at_ms for row in rows)
     end = max(row.closed_at_ms or row.opened_at_ms for row in rows)
-    return f"{_format_timestamp(start)} – {_format_timestamp(end)}"
+    return f"{_format_timestamp(start, zone=zone)} – {_format_timestamp(end, zone=zone)}"
 
 
-def _format_timestamp(value: int, *, include_time: bool = False, month: bool = False) -> str:
-    parsed = datetime.fromtimestamp(value / 1000, tz=UTC)
+def _format_timestamp(
+    value: int,
+    *,
+    include_time: bool = False,
+    month: bool = False,
+    zone: ZoneInfo | None = None,
+) -> str:
+    target_zone = zone or ZoneInfo("UTC")
+    parsed = datetime.fromtimestamp(value / 1000, tz=UTC).astimezone(target_zone)
     if month:
         return parsed.strftime("%Y-%m-01T00:00:00Z")
-    return parsed.strftime("%b %d, %Y %H:%M UTC" if include_time else "%b %d, %Y")
+    return parsed.strftime(
+        f"%b %d, %Y %H:%M {parsed.tzname() or target_zone.key}"
+        if include_time
+        else "%b %d, %Y"
+    )
 
 
 def _duration(value: int) -> str:
@@ -493,16 +672,156 @@ def _display_decimal(value: str) -> str:
     return rendered or "0"
 
 
-def _unsupported_metrics(analytics: AnalyticsSnapshot) -> tuple[UnsupportedMetric, ...]:
-    capabilities = analytics.capabilities
-    labels = ["R multiple", "MAE and MFE", "Benchmark comparison"]
-    if not capabilities.capital_return_metrics:
-        labels.append("Capital-return performance")
-    if not capabilities.mark_to_market_metrics:
-        labels.append("Mark-to-market excursion")
-    if not capabilities.notional_metrics:
-        labels.append("Notional exposure")
-    return tuple(UnsupportedMetric(label) for label in labels)
+def _execution_notional(row: dict[str, str]) -> str:
+    if row.get("notional"):
+        return _display_decimal(row["notional"])
+    try:
+        base_quantity = Decimal(row.get("base_quantity") or "")
+        price = Decimal(row.get("price") or "")
+    except InvalidOperation:
+        return "Unavailable"
+    return _display_decimal(str(base_quantity * price))
+
+
+def _row_timestamp(row: dict[str, str], field: str, zone: ZoneInfo) -> str:
+    try:
+        value = int(row.get(field) or 0)
+    except ValueError:
+        value = 0
+    return _format_timestamp(value, include_time=True, zone=zone) if value else "Unavailable"
+
+
+def _timezone(value: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(value or "UTC")
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _timezone_options(selected: str) -> tuple[FilterOption, ...]:
+    preferred = (
+        "UTC",
+        "America/New_York",
+        "America/Chicago",
+        "Europe/London",
+        "Europe/Berlin",
+        "Asia/Bangkok",
+        "Asia/Singapore",
+        "Asia/Tokyo",
+        "Australia/Sydney",
+    )
+    available = available_timezones()
+    values = tuple(value for value in preferred if value in available or value == "UTC")
+    if selected not in values:
+        values = (*values, selected)
+    return tuple(FilterOption(value.replace("_", " "), value) for value in values)
+
+
+def _parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return date.min
+
+
+def _analytics_date_bounds(
+    rows: tuple[EpisodeRow, ...], zone: ZoneInfo
+) -> tuple[str, str]:
+    if not rows:
+        return "", ""
+    start = datetime.fromtimestamp(min(row.opened_at_ms for row in rows) / 1000, tz=UTC)
+    end_ms = max(row.closed_at_ms or row.opened_at_ms for row in rows)
+    end = datetime.fromtimestamp(end_ms / 1000, tz=UTC)
+    return start.astimezone(zone).date().isoformat(), end.astimezone(zone).date().isoformat()
+
+
+def _period_start(value: date, interval: str) -> date:
+    if interval == "year":
+        return date(value.year, 1, 1)
+    if interval == "quarter":
+        return date(value.year, ((value.month - 1) // 3) * 3 + 1, 1)
+    return date(value.year, value.month, 1)
+
+
+def _is_baseline_filter(
+    filters: DashboardFilters, full_start_date: str, full_end_date: str
+) -> bool:
+    return all(
+        (
+            filters.profile == "all",
+            filters.market_class == "all",
+            not filters.start_date or filters.start_date == full_start_date,
+            not filters.end_date or filters.end_date == full_end_date,
+            filters.weekday is None,
+            filters.hour_bucket is None,
+            filters.direction == "all",
+            filters.duration == "all",
+            filters.outcome == "all",
+            not filters.query,
+        )
+    )
+
+
+def _dashboard_coverage_gaps(
+    analytics: AnalyticsSnapshot, filters: DashboardFilters, zone: ZoneInfo
+) -> tuple[CoverageGap, ...]:
+    report = getattr(analytics, "build_report", None)
+    gaps = getattr(report, "gaps", ())
+    selected = (
+        item
+        for item in gaps
+        if (filters.profile == "all" or str(getattr(item, "venue", "")).lower() == filters.profile)
+        and (
+            filters.market_class == "all"
+            or str(getattr(item, "market_type", "")).lower() == filters.market_class
+        )
+        and _gap_overlaps_dates(item, filters, zone)
+    )
+    return tuple(
+        CoverageGap(
+            profile=" · ".join(
+                part
+                for part in (
+                    str(getattr(item, "venue", "")).replace("_", " ").title(),
+                    str(getattr(item, "account_id", "")).replace("_", " ").title(),
+                )
+                if part
+            ),
+            market_class=str(getattr(item, "market_type", "")).replace("_", " ").title(),
+            start=_format_timestamp(
+                int(getattr(item, "start_ms", 0)), include_time=True, zone=zone
+            ),
+            end=_format_timestamp(int(getattr(item, "end_ms", 0)), include_time=True, zone=zone),
+            status=str(getattr(item, "status", "incomplete")).replace("_", " ").title(),
+            reason=str(getattr(item, "reason", "") or "No source reason was recorded."),
+            source=" · ".join(
+                part
+                for part in (
+                    str(getattr(item, "source", "")).replace("_", " "),
+                    str(getattr(item, "acquisition", "")).upper(),
+                )
+                if part
+            )
+            or "Recorded collection coverage",
+        )
+        for item in selected
+    )
+
+
+def _gap_overlaps_dates(
+    item: AnalyticsCoverageGap, filters: DashboardFilters, zone: ZoneInfo
+) -> bool:
+    try:
+        start = datetime.fromtimestamp(int(item.start_ms) / 1000, tz=UTC)
+        end = datetime.fromtimestamp(int(item.end_ms) / 1000, tz=UTC)
+    except (TypeError, ValueError):
+        return True
+    start_date = start.astimezone(zone).date()
+    end_date = end.astimezone(zone).date()
+    return (
+        (not filters.start_date or end_date >= _parse_date(filters.start_date))
+        and (not filters.end_date or start_date <= _parse_date(filters.end_date))
+    )
 
 
 class SyntheticSnapshotProvider:
@@ -516,22 +835,36 @@ class SyntheticSnapshotProvider:
 
     def load(self, filters: DashboardFilters) -> DashboardSnapshot:
         snapshot = _synthetic_snapshot(self._revision)
+        zone = _timezone(filters.timezone or snapshot.timezone)
         episodes = tuple(
-            episode for episode in snapshot.episodes if _matches_episode(episode, filters)
+            replace(
+                episode,
+                occurred_at=_format_timestamp(
+                    int(_synthetic_episode_datetime(episode).timestamp() * 1000),
+                    include_time=True,
+                    zone=zone,
+                ),
+            )
+            for episode in snapshot.episodes
+            if _matches_episode(episode, filters, zone)
         )
-        performance = _apply_horizon(snapshot.performance, filters.horizon)
+        performance = _aggregate_performance_points(snapshot.performance, filters.interval)
+        performance = _apply_horizon(performance, filters.horizon, filters.interval)
         return DashboardSnapshot(
             revision=snapshot.revision,
             refreshed_label=snapshot.refreshed_label,
-            timezone=snapshot.timezone,
+            timezone=zone.key,
             date_range=snapshot.date_range,
             currency=snapshot.currency,
             status=snapshot.status,
             message=snapshot.message,
             profiles=snapshot.profiles,
             market_classes=snapshot.market_classes,
+            timezone_options=snapshot.timezone_options,
+            date_start=snapshot.date_start,
+            date_end=snapshot.date_end,
             kpis=snapshot.kpis,
-            performance=_sample_performance(performance, filters.interval),
+            performance=performance,
             regimes=snapshot.regimes,
             notable_changes=snapshot.notable_changes,
             heatmap=snapshot.heatmap,
@@ -541,12 +874,12 @@ class SyntheticSnapshotProvider:
             years=snapshot.years,
             episodes=episodes,
             coverage=snapshot.coverage,
-            unsupported_metrics=snapshot.unsupported_metrics,
+            coverage_gaps=snapshot.coverage_gaps,
             build=snapshot.build,
         )
 
 
-def _matches_episode(episode: Episode, filters: DashboardFilters) -> bool:
+def _matches_episode(episode: Episode, filters: DashboardFilters, zone: ZoneInfo) -> bool:
     if filters.profile != "all" and episode.profile.lower() != filters.profile:
         return False
     if filters.market_class != "all" and episode.market_class.lower() != filters.market_class:
@@ -557,45 +890,99 @@ def _matches_episode(episode: Episode, filters: DashboardFilters) -> bool:
         return False
     if filters.outcome != "all" and episode.outcome.lower() != filters.outcome:
         return False
+    occurred = _synthetic_episode_datetime(episode).astimezone(zone)
+    if filters.start_date and occurred.date() < _parse_date(filters.start_date):
+        return False
+    if filters.end_date and occurred.date() > _parse_date(filters.end_date):
+        return False
+    if filters.weekday is not None and occurred.weekday() != filters.weekday:
+        return False
+    if filters.hour_bucket is not None and (occurred.hour // 2) * 2 != filters.hour_bucket:
+        return False
     query = filters.query.strip().lower()
     searchable = " ".join(
-        (episode.episode_id, episode.profile, episode.direction, *episode.tags)
+        (
+            episode.episode_id,
+            episode.profile,
+            episode.instrument,
+            episode.direction,
+            *episode.tags,
+        )
     ).lower()
     return not query or query in searchable
 
 
+def _synthetic_episode_datetime(episode: Episode) -> datetime:
+    text = episode.occurred_at.rsplit(" ", 1)[0]
+    parsed = datetime.strptime(text, "%b %d, %Y %H:%M")
+    return parsed.replace(tzinfo=ZoneInfo("America/New_York"))
+
+
 def _apply_horizon(
-    points: tuple[PerformancePoint, ...], horizon: str
+    points: tuple[PerformancePoint, ...], horizon: str, interval: str
 ) -> tuple[PerformancePoint, ...]:
-    months = {"1y": 12, "2y": 24, "3y": 36}.get(horizon)
-    return points[-months:] if months else points
+    years = {"1y": 1, "2y": 2, "3y": 3}.get(horizon)
+    if not years:
+        return points
+    periods_per_year = {"month": 12, "quarter": 4, "year": 1}.get(interval, 12)
+    return points[-(years * periods_per_year) :]
 
 
-def _sample_performance(
+def _aggregate_performance_points(
     points: tuple[PerformancePoint, ...], interval: str
 ) -> tuple[PerformancePoint, ...]:
-    step = {"month": 1, "quarter": 3, "year": 12}.get(interval, 1)
-    if step == 1 or len(points) < 2:
+    if interval == "month":
         return points
-    sampled = list(points[::step])
-    if sampled[-1] != points[-1]:
-        sampled.append(points[-1])
-    return tuple(sampled)
+    grouped: dict[date, Decimal] = defaultdict(Decimal)
+    for point in points:
+        grouped[_period_start(date.fromisoformat(point.timestamp[:10]), interval)] += Decimal(
+            str(point.period)
+        )
+    running = Decimal(0)
+    peak = Decimal(0)
+    recent: list[Decimal] = []
+    result: list[PerformancePoint] = []
+    for period_start, amount in sorted(grouped.items()):
+        running += amount
+        peak = max(peak, running)
+        recent.append(amount)
+        result.append(
+            PerformancePoint(
+                f"{period_start.isoformat()}T00:00:00",
+                float(running),
+                float(amount),
+                float(sum(recent[-3:], Decimal(0))),
+                float(running - peak),
+            )
+        )
+    return tuple(result)
+
+
+def _synthetic_performance() -> tuple[PerformancePoint, ...]:
+    running = Decimal(0)
+    peak = Decimal(0)
+    recent: list[Decimal] = []
+    points: list[PerformancePoint] = []
+    for index, month_index in enumerate(range(2021 * 12, 2026 * 12 + 8)):
+        year, month_zero = divmod(month_index, 12)
+        amount = Decimal(3850 + ((index % 7) - 3) * 2100)
+        running += amount
+        peak = max(peak, running)
+        recent.append(amount)
+        points.append(
+            PerformancePoint(
+                f"{year:04d}-{month_zero + 1:02d}-01T00:00:00",
+                float(running),
+                float(amount),
+                float(sum(recent[-3:], Decimal(0))),
+                float(running - peak),
+            )
+        )
+    return tuple(points)
 
 
 def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
-    performance = tuple(
-        PerformancePoint(
-            timestamp=f"{year:04d}-{month:02d}-01T00:00:00Z",
-            net=float(index * 3850 + ((index % 7) - 3) * 2100),
-            benchmark=float(index * 2450 + ((index % 9) - 4) * 1200),
-            drawdown=float(-4 - (index % 11) * 1.35 - (9 if 13 <= index <= 18 else 0)),
-        )
-        for index, (year, month) in enumerate(
-            (month_index // 12, month_index % 12 + 1)
-            for month_index in range(2021 * 12, 2026 * 12 + 8)
-        )
-    )
+    performance = _synthetic_performance()
     heat_values = tuple(
         tuple(round((((row * 5 + column * 3) % 17) - 8) / 8, 2) for column in range(12))
         for row in range(7)
@@ -626,20 +1013,22 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
             FilterOption("All market classes", "all"),
             FilterOption("Perpetual derivatives", "perpetual derivatives"),
         ),
+        timezone_options=_timezone_options("America/New_York"),
+        date_start="2021-01-01",
+        date_end="2026-08-21",
         kpis=(
-            Kpi("Net result", "+$268,742.31", "+68.74%", "Total return", "positive"),
-            Kpi("CAGR", "17.32%", "vs. 8.64%", "Benchmark", "info"),
-            Kpi("Closed episodes", "1,842", "92.3%", "Win rate", "info"),
-            Kpi("Max drawdown", "-21.83%", "Mar 10 – Apr 6", "Peak decline", "negative"),
+            Kpi(
+                "Attributed cashflow",
+                "+268,742.31",
+                "1,842 episodes",
+                "Comparable amounts",
+                "positive",
+            ),
+            Kpi("Closed episodes", "1,842", "Observed", "Reconstructed", "info"),
+            Kpi("Win rate", "62.3%", "1,147 wins", "1,842 closed episodes", "positive"),
+            Kpi("Median duration", "2h 41m", "Closed episodes", "Observed holding time", "info"),
         ),
         performance=performance,
-        regimes=(
-            Regime("Rising market", "2021-01-01", "2021-11-30", "positive"),
-            Regime("Risk-off", "2021-12-01", "2022-06-30", "negative"),
-            Regime("Recovery", "2022-07-01", "2023-12-31", "positive"),
-            Regime("Expansion", "2024-01-01", "2025-07-31", "positive"),
-            Regime("Normalization", "2025-08-01", "2026-08-31", "info"),
-        ),
         notable_changes=(
             NotableChange(
                 1,
@@ -670,26 +1059,40 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
             hours=tuple(f"{hour:02d}" for hour in range(0, 24, 2)),
             weekdays=("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
             values=heat_values,
+            metric_label="Performance by weekday & hour (average comparable cashflow)",
+            unit="reporting currency",
         ),
         exposure=tuple(
-            ExposureBand(label, long_count, long_average, short_count, short_average, net)
-            for label, long_count, long_average, short_count, short_average, net in (
-                ("0 – 15m", 326, 0.18, 298, -0.03, 0.15),
-                ("15m – 1h", 412, 0.32, 389, 0.06, 0.26),
-                ("1h – 4h", 501, 0.46, 472, 0.15, 0.31),
-                ("4h – 1d", 304, 0.41, 276, 0.08, 0.32),
-                ("1d – 3d", 176, 0.63, 148, 0.12, 0.51),
-                ("3d+", 123, 0.74, 94, 0.18, 0.56),
+            ExposureBand(label, key, long_count, long_average, short_count, short_average, net)
+            for label, key, long_count, long_average, short_count, short_average, net in (
+                ("Under 1h", "under_1h", 326, 18.0, 298, -3.0, 15.0),
+                ("1h – 1d", "1h_to_1d", 412, 32.0, 389, 6.0, 26.0),
+                ("1d – 7d", "1d_to_7d", 176, 63.0, 148, 12.0, 51.0),
+                ("7d – 30d", "7d_to_30d", 42, 41.0, 36, 8.0, 32.0),
+                ("30d+", "30d_or_more", 12, 74.0, 9, 18.0, 56.0),
             )
         ),
         years=years,
         episodes=episodes,
-        coverage=CoverageSummary(98.7, 1816, 1842, "Jan 1, 2021 – Aug 21, 2026"),
-        unsupported_metrics=(
-            UnsupportedMetric("Slippage", 4.3),
-            UnsupportedMetric("Commission detail", 2.1),
-            UnsupportedMetric("Latency", 1.8),
-            UnsupportedMetric("Market depth", 8.6),
+        coverage=CoverageSummary(
+            98.7,
+            1816,
+            1842,
+            "Jan 1, 2021 – Aug 21, 2026",
+            1824,
+            10,
+            8,
+        ),
+        coverage_gaps=(
+            CoverageGap(
+                "Example profile",
+                "Perpetual derivatives",
+                "Jan 08, 2022 00:00 EST",
+                "Jan 09, 2022 00:00 EST",
+                "Partial",
+                "The source recorded a pagination-depth limitation.",
+                "Historical trade collection",
+            ),
         ),
         build=BuildSummary(
             timestamp="Aug 21, 2026 08:14",
@@ -705,45 +1108,76 @@ def _episode(index: int) -> Episode:
     positive = index % 3 != 2
     direction = "Long" if index % 2 else "Short"
     profile = "Discretionary" if index % 3 else "Systematic"
-    r_multiple = round((0.17 + (index % 7) * 0.29) * (1 if positive else -1), 2)
+    net_result = round((17 + (index % 7) * 29) * (1 if positive else -1), 2)
     hours = (index * 3) % 24
     day = 21 - index // 3
     duration_bucket, duration = (
-        ("short", f"{20 + index * 3}m")
+        ("under_1h", f"{20 + index * 3}m")
         if index % 4 == 1
-        else ("medium", f"{1 + index % 5}h {index * 7 % 60}m")
+        else ("1h_to_1d", f"{1 + index % 5}h {index * 7 % 60}m")
         if index % 4 in {0, 2}
-        else ("long", f"1d {index % 8}h")
+        else ("1d_to_7d", f"1d {index % 8}h")
     )
-    timeline = (0.0, -0.18, 0.12, 0.35, 0.62, 0.78, 0.91, r_multiple)
+    opened = f"Aug {day:02d}, 2026 {hours:02d}:{(index * 11) % 60:02d} EDT"
     return Episode(
         episode_id=f"episode-{index:03d}",
-        occurred_at=f"Aug {day:02d}, 2026 {hours:02d}:{(index * 11) % 60:02d}",
+        occurred_at=opened,
         profile=profile,
         market_class="Perpetual derivatives",
+        instrument=f"INSTRUMENT-{index % 5 + 1}",
+        status="Closed",
         direction=direction,
         duration=duration,
         duration_bucket=duration_bucket,
-        entry="—",
-        exit="—",
-        r_multiple=r_multiple,
+        entry=f"{100 + index * 1.25:.2f}",
+        exit=f"{101 + index * 1.1:.2f}",
         outcome="Win" if positive else "Loss",
-        mae=round(-0.04 - (index % 5) * 0.07, 2),
-        mfe=round(abs(r_multiple) + 0.38 + (index % 4) * 0.17, 2),
+        net_result=net_result,
+        result_currency="Reporting currency",
         tags=("Breakout", "Trend") if index % 2 else ("Mean reversion",),
-        timeline_labels=("09:42", "10:00", "10:30", "11:00", "11:30", "12:00", "12:15", "12:18"),
-        timeline_values=timeline,
-        attribution=(
-            AttributionItem("Entry edge", round(abs(r_multiple) * 0.58, 2)),
-            AttributionItem("Trade management", round(abs(r_multiple) * 0.34, 2)),
-            AttributionItem("Costs", -0.16),
+        executions=(
+            ExecutionDetail(
+                opened,
+                "Open",
+                "Buy" if direction == "Long" else "Sell",
+                f"{100 + index * 1.25:.2f}",
+                "1",
+                "base",
+                f"{100 + index * 1.25:.2f}",
+                "0.10",
+                "Reporting currency",
+                f"order-{index:03d}-open",
+            ),
+            ExecutionDetail(
+                opened,
+                "Close",
+                "Sell" if direction == "Long" else "Buy",
+                f"{101 + index * 1.1:.2f}",
+                "1",
+                "base",
+                f"{101 + index * 1.1:.2f}",
+                "0.10",
+                "Reporting currency",
+                f"order-{index:03d}-close",
+            ),
+        ),
+        cashflows=(
+            CashflowDetail(
+                opened,
+                "Realized result",
+                str(net_result),
+                "Reporting currency",
+                str(net_result),
+                "Reporting currency",
+                "Execution link",
+            ),
         ),
         quality=(
-            QualityIndicator("Setup quality", "High"),
-            QualityIndicator("Execution quality", "High"),
-            QualityIndicator("Process adherence", "94%"),
-            QualityIndicator("Data completeness", "Complete"),
+            QualityIndicator("Boundary status", "Complete"),
+            QualityIndicator("Source coverage", "Complete"),
+            QualityIndicator("Execution count", "2", "info"),
+            QualityIndicator("Order count", "2", "info"),
         ),
-        confidence="High" if index % 4 else "Medium",
-        samples=380 + index * 4,
+        confidence="High",
+        samples=2,
     )

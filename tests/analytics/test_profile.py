@@ -30,8 +30,6 @@ def test_capabilities_disable_metrics_without_required_economic_facts(
 
     assert snapshot.capabilities.episode_reconstruction
     assert not snapshot.capabilities.notional_metrics
-    assert not snapshot.capabilities.capital_return_metrics
-    assert not snapshot.capabilities.mark_to_market_metrics
     assert any(flag.code == "missing_contract_economics" for flag in snapshot.quality_flags)
 
 

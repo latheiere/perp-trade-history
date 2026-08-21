@@ -4,13 +4,15 @@ from pathlib import Path
 from typing import Any
 
 import dash_mantine_components as dmc
-from dash import Dash, Input, Output, State, no_update
+from dash import ALL, Dash, Input, Output, State, ctx, no_update
+from dash.exceptions import PreventUpdate
 
 from perp_trade_history.dashboard.layout import build_layout
 from perp_trade_history.dashboard.models import DashboardFilters
 from perp_trade_history.dashboard.providers import SnapshotProvider, SyntheticSnapshotProvider
 from perp_trade_history.dashboard.service import SnapshotService
 from perp_trade_history.dashboard.views import (
+    collection_build_report,
     context_card,
     data_quality_cards,
     episode_detail,
@@ -71,14 +73,20 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         Output("profile-filter", "value"),
         Output("market-class-filter", "data"),
         Output("market-class-filter", "value"),
+        Output("timezone-filter", "data"),
+        Output("timezone-filter", "value"),
+        Output("date-range-filter", "min_date_allowed"),
+        Output("date-range-filter", "max_date_allowed"),
         Input("snapshot-signal", "data"),
         State("profile-filter", "value"),
         State("market-class-filter", "value"),
+        State("timezone-filter", "value"),
     )
     def update_filter_options(
         _signal: dict[str, Any],
         current_profile: str | None,
         current_market_class: str | None,
+        current_timezone: str | None,
     ):
         snapshot = service.get(DashboardFilters())
         profiles = [{"label": item.label, "value": item.value} for item in snapshot.profiles]
@@ -87,17 +95,64 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         ]
         valid_profiles = {item["value"] for item in profiles}
         valid_market_classes = {item["value"] for item in market_classes}
+        timezones = [
+            {"label": item.label, "value": item.value} for item in snapshot.timezone_options
+        ] or [snapshot.timezone]
+        valid_timezones = {item["value"] if isinstance(item, dict) else item for item in timezones}
         return (
             profiles,
             current_profile if current_profile in valid_profiles else "all",
             market_classes,
             current_market_class if current_market_class in valid_market_classes else "all",
+            timezones,
+            current_timezone if current_timezone in valid_timezones else snapshot.timezone,
+            snapshot.date_start or None,
+            snapshot.date_end or None,
         )
+
+    @app.callback(
+        Output("pattern-filter", "data"),
+        Output("duration-filter", "value"),
+        Output("direction-filter", "value"),
+        Input("heatmap-graph", "clickData"),
+        Input({"type": "exposure-drill", "value": ALL, "side": ALL}, "n_clicks"),
+        Input("clear-pattern-filter", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def drill_into_pattern(
+        heatmap_click: dict[str, Any] | None,
+        _exposure_clicks: list[int | None],
+        _clear_clicks: int | None,
+    ):
+        if (
+            isinstance(ctx.triggered_id, dict)
+            and ctx.triggered_id.get("type") == "exposure-drill"
+            and not any(_exposure_clicks)
+        ):
+            raise PreventUpdate
+        return _pattern_drill(ctx.triggered_id, heatmap_click)
+
+    app.clientside_callback(
+        """
+        function(pattern) {
+            if (!pattern || !pattern.source) {
+                return window.dash_clientside.no_update;
+            }
+            window.setTimeout(function() {
+                const ledger = document.getElementById('episode-grid');
+                if (ledger) ledger.scrollIntoView({behavior: 'smooth', block: 'center'});
+            }, 80);
+            return Date.now();
+        }
+        """,
+        Output("drill-focus-sink", "data"),
+        Input("pattern-filter", "data"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("kpi-grid", "children"),
         Output("performance-graph", "figure"),
-        Output("performance-caption", "children"),
         Output("notable-changes", "children"),
         Output("heatmap-graph", "figure"),
         Output("exposure-panel", "children"),
@@ -106,7 +161,9 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         Output("episode-grid", "rowData"),
         Output("episode-grid", "selectedRows"),
         Output("episode-count", "children"),
+        Output("pattern-focus-label", "children"),
         Output("data-quality-grid", "children"),
+        Output("collection-build-report", "children"),
         Output("footer-timezone", "children"),
         Output("data-state-banner", "children"),
         Output("data-state-banner", "className"),
@@ -115,6 +172,11 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         Input("market-class-filter", "value"),
         Input("interval-filter", "value"),
         Input("horizon-filter", "value"),
+        Input("date-range-filter", "start_date"),
+        Input("date-range-filter", "end_date"),
+        Input("timezone-filter", "value"),
+        Input("performance-view-filter", "value"),
+        Input("pattern-filter", "data"),
         Input("direction-filter", "value"),
         Input("duration-filter", "value"),
         Input("outcome-filter", "value"),
@@ -126,6 +188,11 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         market_class: str | None,
         interval: str | None,
         horizon: str | None,
+        start_date: str | None,
+        end_date: str | None,
+        timezone: str | None,
+        performance_view: str | None,
+        pattern: dict[str, Any] | None,
         direction: str | None,
         duration: str | None,
         outcome: str | None,
@@ -136,6 +203,12 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
             market_class=market_class or "all",
             interval=interval or "month",
             horizon=horizon or "all",
+            start_date=start_date or "",
+            end_date=end_date or "",
+            timezone=timezone or "UTC",
+            performance_view=performance_view or "cumulative",
+            weekday=_optional_int((pattern or {}).get("weekday")),
+            hour_bucket=_optional_int((pattern or {}).get("hour_bucket")),
             direction=_normalized_filter(direction, "All directions"),
             duration=duration or "all",
             outcome=_normalized_filter(outcome, "All outcomes"),
@@ -147,12 +220,7 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         banner, banner_class = _state_banner(snapshot.status, snapshot.message, signal)
         return (
             kpi_cards(snapshot.kpis),
-            performance_figure(snapshot),
-            (
-                f"{snapshot.coverage.percent:.1f}% complete coverage"
-                if snapshot.coverage.total
-                else "Coverage unavailable"
-            ),
+            performance_figure(snapshot, performance_view or "cumulative"),
             notable_changes(snapshot.notable_changes),
             heatmap_figure(snapshot),
             exposure_panel(
@@ -165,7 +233,9 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
             rows,
             selected_rows,
             f"Showing 1–{min(20, len(rows))} of {len(rows):,}" if rows else "No matching episodes",
-            data_quality_cards(snapshot.coverage, snapshot.unsupported_metrics, snapshot.build),
+            _pattern_label(pattern),
+            data_quality_cards(snapshot.coverage, snapshot.build),
+            collection_build_report(snapshot.coverage_gaps),
             f"All times shown in {snapshot.timezone}",
             banner,
             banner_class,
@@ -179,6 +249,11 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         State("market-class-filter", "value"),
         State("interval-filter", "value"),
         State("horizon-filter", "value"),
+        State("date-range-filter", "start_date"),
+        State("date-range-filter", "end_date"),
+        State("timezone-filter", "value"),
+        State("performance-view-filter", "value"),
+        State("pattern-filter", "data"),
         State("direction-filter", "value"),
         State("duration-filter", "value"),
         State("outcome-filter", "value"),
@@ -191,6 +266,11 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         market_class: str | None,
         interval: str | None,
         horizon: str | None,
+        start_date: str | None,
+        end_date: str | None,
+        timezone: str | None,
+        performance_view: str | None,
+        pattern: dict[str, Any] | None,
         direction: str | None,
         duration: str | None,
         outcome: str | None,
@@ -202,6 +282,12 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
                 market_class=market_class or "all",
                 interval=interval or "month",
                 horizon=horizon or "all",
+                start_date=start_date or "",
+                end_date=end_date or "",
+                timezone=timezone or "UTC",
+                performance_view=performance_view or "cumulative",
+                weekday=_optional_int((pattern or {}).get("weekday")),
+                hour_bucket=_optional_int((pattern or {}).get("hour_bucket")),
                 direction=_normalized_filter(direction, "All directions"),
                 duration=duration or "all",
                 outcome=_normalized_filter(outcome, "All outcomes"),
@@ -216,10 +302,82 @@ def _register_callbacks(app: Dash, service: SnapshotService) -> None:
         return episode_detail(episode)
 
 
+def _pattern_drill(
+    triggered: object,
+    heatmap_click: dict[str, Any] | None,
+) -> tuple[dict[str, object], object, object]:
+    if triggered == "clear-pattern-filter":
+        return {}, "all", "All directions"
+    if isinstance(triggered, dict) and triggered.get("type") == "exposure-drill":
+        side = str(triggered.get("side") or "net")
+        direction = side.title() if side in {"long", "short"} else no_update
+        return (
+            {"source": "exposure", "label": str(triggered.get("value") or "")},
+            str(triggered.get("value") or "all"),
+            direction,
+        )
+    if triggered == "heatmap-graph" and heatmap_click:
+        point = (heatmap_click.get("points") or [{}])[0]
+        weekdays = {
+            "Mon": 0,
+            "Tue": 1,
+            "Wed": 2,
+            "Thu": 3,
+            "Fri": 4,
+            "Sat": 5,
+            "Sun": 6,
+        }
+        weekday = weekdays.get(str(point.get("y")))
+        try:
+            hour_bucket = int(str(point.get("x")))
+        except ValueError as exc:
+            raise PreventUpdate from exc
+        if weekday is None:
+            raise PreventUpdate
+        return (
+            {
+                "source": "heatmap",
+                "weekday": weekday,
+                "hour_bucket": hour_bucket,
+            },
+            no_update,
+            no_update,
+        )
+    raise PreventUpdate
+
+
 def _normalized_filter(value: str | None, all_label: str) -> str:
     if not value or value == all_label:
         return "all"
     return value.lower()
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pattern_label(pattern: dict[str, Any] | None) -> str:
+    if not pattern or not pattern.get("source"):
+        return "No pattern focus"
+    if pattern.get("source") == "heatmap":
+        weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        weekday = _optional_int(pattern.get("weekday"))
+        hour = _optional_int(pattern.get("hour_bucket"))
+        if weekday is not None and hour is not None and 0 <= weekday < len(weekdays):
+            return f"{weekdays[weekday]} · {hour:02d}:00–{(hour + 1) % 24:02d}:59"
+    labels = {
+        "under_1h": "Under 1 hour",
+        "1h_to_1d": "1 hour – 1 day",
+        "1d_to_7d": "1 – 7 days",
+        "7d_to_30d": "7 – 30 days",
+        "30d_or_more": "30 days or more",
+    }
+    return labels.get(str(pattern.get("label") or ""), "Pattern focus")
 
 
 def _state_banner(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from perp_trade_history.analytics.schema import (
     AnalyticsCapabilities,
@@ -13,6 +16,8 @@ from perp_trade_history.dashboard.models import DashboardFilters
 from perp_trade_history.dashboard.providers import (
     AnalyticsSnapshotProvider,
     SyntheticSnapshotProvider,
+    _cashflow_performance,
+    _matches_analytics_episode,
 )
 from perp_trade_history.storage import DataStore
 
@@ -54,6 +59,8 @@ def _analytics_snapshot(*, with_cashflow: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         as_of_ms=1_640_998_800_000,
         episodes=(_episode(),),
+        execution_links=(),
+        cashflow_attributions=(),
         episode_cashflows=(
             (
                 SimpleNamespace(
@@ -102,10 +109,10 @@ def _analytics_snapshot(*, with_cashflow: bool = False) -> SimpleNamespace:
             exact_execution_cashflow_attribution=False,
             temporal_cashflow_attribution=False,
             notional_metrics=False,
-            capital_return_metrics=False,
-            mark_to_market_metrics=False,
-            complete_coverage=True,
+            complete_source_trade_coverage=True,
+            complete_reconstructed_episode_boundaries=True,
         ),
+        build_report=SimpleNamespace(gaps=()),
     )
 
 
@@ -126,7 +133,7 @@ def test_synthetic_provider_is_deterministic_and_filterable() -> None:
     assert any(item.confidence == "Low confidence" for item in first.notable_changes)
 
 
-def test_analytics_provider_uses_file_identity_and_never_fabricates_unsupported_metrics(
+def test_analytics_provider_uses_file_identity_and_only_exposes_trade_supported_metrics(
     tmp_path, monkeypatch
 ) -> None:
     store = DataStore(tmp_path)
@@ -151,16 +158,15 @@ def test_analytics_provider_uses_file_identity_and_never_fabricates_unsupported_
 
     assert provider.revision() != first_revision
     assert replacement_revision != first_file_revision
-    assert snapshot.episodes[0].r_multiple is None
-    assert snapshot.episodes[0].mae is None
-    assert snapshot.episodes[0].mfe is None
     assert snapshot.episodes[0].outcome == "Unavailable"
+    assert snapshot.episodes[0].instrument == "instrument-generic"
+    assert snapshot.episodes[0].status == "Closed"
+    assert snapshot.episodes[0].net_result is None
     assert snapshot.heatmap.metric_label == "Activity by weekday & hour (episode count)"
     assert sum(sum(row) for row in snapshot.heatmap.values) == 1
     assert all(item.net_average is None for item in snapshot.exposure)
     assert snapshot.notable_changes[0].confidence == "Low confidence"
-    unavailable = {item.label for item in snapshot.unsupported_metrics}
-    assert {"R multiple", "MAE and MFE", "Capital-return performance"} <= unavailable
+    assert not hasattr(snapshot, "unsupported_metrics")
 
 
 def test_analytics_provider_derives_safe_cashflow_patterns(tmp_path, monkeypatch) -> None:
@@ -180,3 +186,61 @@ def test_analytics_provider_derives_safe_cashflow_patterns(tmp_path, monkeypatch
     assert band.long_average == 5.0
     assert band.net_average == 5.0
     assert snapshot.episodes[0].outcome == "Win"
+    assert snapshot.episodes[0].net_result == 5.0
+
+
+def test_trade_filters_apply_exact_duration_local_time_and_open_status() -> None:
+    episode = replace(
+        _episode(),
+        status="open",
+        closed_at_ms=None,
+        boundary_status="right_censored",
+        duration_bucket="under_1h",
+    )
+    zone = ZoneInfo("America/New_York")
+
+    assert _matches_analytics_episode(
+        episode,
+        DashboardFilters(
+            duration="under_1h",
+            outcome="open",
+            start_date="2021-12-31",
+            end_date="2021-12-31",
+            weekday=4,
+            hour_bucket=18,
+        ),
+        {episode.episode_id: Decimal("5")},
+        zone,
+    )
+    assert not _matches_analytics_episode(
+        episode,
+        DashboardFilters(hour_bucket=20),
+        {episode.episode_id: Decimal("5")},
+        zone,
+    )
+
+
+def test_performance_aggregation_rebuilds_period_rolling_and_drawdown_series() -> None:
+    first = _episode()
+    second = replace(
+        first,
+        episode_id="episode-later",
+        opened_at_ms=1_643_673_600_000,
+        closed_at_ms=1_643_677_200_000,
+        open_year=2022,
+        open_month="2022-02",
+        close_year=2022,
+        close_month="2022-02",
+    )
+
+    points = _cashflow_performance(
+        (first, second),
+        {first.episode_id: Decimal("10"), second.episode_id: Decimal("-14")},
+        "month",
+        ZoneInfo("UTC"),
+    )
+
+    assert [point.period for point in points] == [10.0, -14.0]
+    assert [point.net for point in points] == [10.0, -4.0]
+    assert [point.rolling for point in points] == [10.0, -4.0]
+    assert [point.drawdown for point in points] == [0.0, -14.0]

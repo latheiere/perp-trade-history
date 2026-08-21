@@ -157,6 +157,41 @@ class SyntheticHistory:
             )
         )
 
+    def add_trade_coverage(
+        self,
+        record_id: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        status: str,
+        limitation: str = "",
+        source: str = "synthetic",
+        acquisition: str = "fixture",
+        scope: str = "account",
+        venue: str = "venue_a",
+        account_id: str = "account_a",
+        market_type: str = "perpetual",
+        collected_at: str = "collection",
+    ) -> None:
+        self.rows.setdefault("coverage", []).append(
+            row_for(
+                "coverage",
+                record_id=record_id,
+                venue=venue,
+                account_id=account_id,
+                market_type=market_type,
+                dataset="trades",
+                source=source,
+                acquisition=acquisition,
+                scope=scope,
+                start_time_ms=start_ms,
+                end_time_ms=end_ms,
+                status=status,
+                limitation=limitation,
+                collected_at=collected_at,
+            )
+        )
+
     def write(self, root: Path) -> DataStore:
         store = DataStore(root)
         for table, rows in self.rows.items():

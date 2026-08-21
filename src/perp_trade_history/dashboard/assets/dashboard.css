@@ -103,6 +103,20 @@ body {
   font-size: 11px;
 }
 
+.date-range-control .DateRangePickerInput,
+.date-range-control .DateInput_input {
+  min-height: 34px;
+  color: var(--dashboard-text);
+  background: #0a1823;
+  border-color: #294252;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.date-range-control .DateRangePickerInput {
+  min-width: 245px;
+}
+
 .command-bar .mantine-Burger-burger,
 .command-bar .mantine-Burger-burger::before,
 .command-bar .mantine-Burger-burger::after {
@@ -402,6 +416,18 @@ body {
   min-height: 37px;
 }
 
+.exposure-drill {
+  display: block;
+  width: 100%;
+  border-radius: 3px;
+}
+
+.exposure-drill:hover,
+.exposure-drill:focus-visible {
+  background: rgba(46, 168, 255, 0.08);
+  outline: 1px solid rgba(46, 168, 255, 0.35);
+}
+
 .duration-label,
 .duration-count,
 .metric-number {
@@ -492,6 +518,11 @@ body {
   max-width: 120px;
 }
 
+.year-distribution {
+  width: 100%;
+  max-width: 180px;
+}
+
 .year-hold {
   margin-top: 4px;
   color: var(--dashboard-text);
@@ -528,8 +559,22 @@ body {
   margin-left: auto;
 }
 
+.pattern-focus-label {
+  flex: 0 0 auto;
+}
+
 .ag-root-wrapper {
   border: 0 !important;
+}
+
+.ag-cell.positive-cell {
+  color: var(--dashboard-green);
+  font-weight: 650;
+}
+
+.ag-cell.negative-cell {
+  color: var(--dashboard-red);
+  font-weight: 650;
 }
 
 .detail-panel {
@@ -572,6 +617,53 @@ body {
   font-weight: 700;
 }
 
+.detail-stat {
+  min-height: 66px;
+  padding: 10px;
+  background: var(--dashboard-surface-alt);
+  border: 1px solid var(--dashboard-border);
+  border-radius: 4px;
+}
+
+.detail-stat-value {
+  margin-top: 5px;
+  color: var(--dashboard-text);
+  font-size: 11px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.detail-table-scroll {
+  width: 100%;
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.detail-data-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-size: 9px;
+}
+
+.detail-data-table th,
+.detail-data-table td {
+  padding: 8px 7px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--dashboard-border);
+}
+
+.detail-data-table th {
+  color: var(--dashboard-muted);
+  background: var(--dashboard-surface-alt);
+  font-weight: 650;
+}
+
+.detail-data-table td {
+  color: #b9c8d1;
+}
+
 .attribution-label {
   width: 105px;
 }
@@ -608,6 +700,22 @@ body {
 .quality-card {
   min-height: 225px;
   padding: 18px 20px;
+}
+
+.collection-report {
+  height: auto;
+  margin-top: 12px;
+  padding: 0;
+}
+
+.collection-report .mantine-Accordion-control {
+  min-height: 52px;
+  padding: 0 18px;
+}
+
+.collection-report .mantine-Accordion-panel {
+  padding: 0 18px 18px;
+  border-top: 1px solid var(--dashboard-border);
 }
 
 .quality-hero {

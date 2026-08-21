@@ -189,6 +189,36 @@ def test_analytics_provider_derives_safe_cashflow_patterns(tmp_path, monkeypatch
     assert snapshot.episodes[0].net_result == 5.0
 
 
+def test_analytics_provider_reuses_canonical_snapshot_across_filters(
+    tmp_path, monkeypatch
+) -> None:
+    store = DataStore(tmp_path)
+    provider = AnalyticsSnapshotProvider(store, reporting_currency="Reporting currency")
+    builds = 0
+
+    def counted_snapshot(store, conversion=None):
+        nonlocal builds
+        builds += 1
+        return _analytics_snapshot(with_cashflow=True)
+
+    monkeypatch.setattr(
+        "perp_trade_history.dashboard.providers.build_snapshot",
+        counted_snapshot,
+    )
+
+    provider.load(DashboardFilters())
+    provider.load(DashboardFilters(direction="long"))
+
+    assert builds == 1
+
+    source = store.tables["executions"].path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("new canonical revision", encoding="utf-8")
+    provider.load(DashboardFilters(direction="short"))
+
+    assert builds == 2
+
+
 def test_trade_filters_apply_exact_duration_local_time_and_open_status() -> None:
     episode = replace(
         _episode(),

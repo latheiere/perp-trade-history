@@ -22,6 +22,11 @@ and quality states come from the current retained history. Newly collected recor
 become visible automatically. A full rebuild is deterministic, so the same source
 boundary produces the same analytical snapshot.
 
+Interactive filters reuse the current in-memory analytical snapshot instead of
+re-reading and reconstructing unchanged history. Any canonical data-file revision
+invalidates that snapshot automatically, so newly collected records appear without
+manual cache management.
+
 Performance can be viewed as cumulative cashflow, period cashflow, a rolling
 three-period total, or absolute cashflow drawdown. Monthly, quarterly, and yearly
 aggregation rebuilds the period series rather than sampling a monthly curve. Date,

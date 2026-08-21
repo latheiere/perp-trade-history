@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+from threading import RLock
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
@@ -53,6 +54,11 @@ class AnalyticsSnapshotProvider:
         self._store = store
         self._conversion = conversion
         self._reporting_currency = reporting_currency
+        self._cache_lock = RLock()
+        self._cached_revision = ""
+        self._cached_analytics: AnalyticsSnapshot | None = None
+        self._cached_execution_rows: list[dict[str, str]] = []
+        self._cached_cashflow_rows: list[dict[str, str]] = []
 
     def revision(self) -> str:
         identities: list[tuple[str, int, int, int]] = []
@@ -66,17 +72,30 @@ class AnalyticsSnapshotProvider:
         return sha256(repr(identities).encode()).hexdigest()[:20]
 
     def load(self, filters: DashboardFilters) -> DashboardSnapshot:
-        analytics = build_snapshot(
-            self._store,
-            conversion=self._conversion,  # type: ignore[arg-type]
-        )
+        revision = self.revision()
+        with self._cache_lock:
+            if self._cached_analytics is None or revision != self._cached_revision:
+                analytics = build_snapshot(
+                    self._store,
+                    conversion=self._conversion,  # type: ignore[arg-type]
+                )
+                execution_rows = _read_optional_table(self._store, "executions")
+                cashflow_rows = _read_optional_table(self._store, "cashflows")
+                self._cached_revision = revision
+                self._cached_analytics = analytics
+                self._cached_execution_rows = execution_rows
+                self._cached_cashflow_rows = cashflow_rows
+            analytics = self._cached_analytics
+            execution_rows = self._cached_execution_rows
+            cashflow_rows = self._cached_cashflow_rows
+        assert analytics is not None
         return _adapt_analytics(
             analytics,
             filters,
-            revision=self.revision(),
+            revision=revision,
             reporting_currency=self._reporting_currency,
-            execution_rows=_read_optional_table(self._store, "executions"),
-            cashflow_rows=_read_optional_table(self._store, "cashflows"),
+            execution_rows=execution_rows,
+            cashflow_rows=cashflow_rows,
         )
 
 

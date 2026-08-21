@@ -280,7 +280,10 @@ def _exposure_column(
                             ),
                             html.Div(
                                 html.Div(
-                                    className=f"metric-bar-fill {side}",
+                                    className=(
+                                        "metric-bar-fill "
+                                        + _outcome_class(getattr(item, f"{side}_average"))
+                                    ),
                                     style={
                                         "width": _percent_width(
                                             getattr(item, f"{side}_count"), max_count
@@ -326,9 +329,13 @@ def _net_column(rows: list[ExposureBand], net_label: str) -> dmc.Box:
                 dmc.UnstyledButton(
                     dmc.Group(
                         [
+                            dmc.Text(item.label, className="duration-label"),
                             html.Div(
                                 html.Div(
-                                    className="metric-bar-fill net",
+                                    className=(
+                                        "metric-bar-fill "
+                                        + _outcome_class(item.net_average)
+                                    ),
                                     style={
                                         "width": (
                                             f"{abs(item.net_average) / maximum * 100:.1f}%"
@@ -367,6 +374,12 @@ def _optional_metric(value: float | None) -> dmc.Text:
         f"{value:+.2f}",
         className="metric-number positive" if value >= 0 else "metric-number negative",
     )
+
+
+def _outcome_class(value: float | None) -> str:
+    if value is None or value == 0:
+        return "neutral"
+    return "positive" if value > 0 else "negative"
 
 
 def _percent_width(value: int, maximum: int) -> str:
@@ -712,6 +725,7 @@ def _execution_figure(items: Iterable[ExecutionDetail]) -> go.Figure:
     observed = [(item, price) for item, price in observed if price is not None]
     if not observed:
         return empty_figure("Price values are absent from the linked execution rows", height=190)
+    price_decimals = _price_decimals(price for _item, price in observed)
     figure = go.Figure(
         go.Scatter(
             x=[item.occurred_at for item, _price in observed],
@@ -738,17 +752,26 @@ def _execution_figure(items: Iterable[ExecutionDetail]) -> go.Figure:
                 ],
             },
             customdata=[
-                [item.transition, item.side, item.quantity, item.quantity_unit]
-                for item, _price in observed
+                [
+                    item.transition,
+                    item.side,
+                    item.quantity,
+                    item.quantity_unit,
+                    f"{price:,.{price_decimals}f}",
+                ]
+                for item, price in observed
             ],
             hovertemplate=(
-                "%{x}<br>Price %{y:,.8g}<br>%{customdata[0]} · %{customdata[1]}"
+                "%{x}<br>Price %{customdata[4]}<br>%{customdata[0]} · %{customdata[1]}"
                 "<br>Quantity %{customdata[2]} %{customdata[3]}<extra></extra>"
             ),
         )
     )
     _style_figure(figure, height=190, margins={"l": 48, "r": 8, "t": 8, "b": 36})
-    figure.update_yaxes(title_text="Execution price")
+    figure.update_yaxes(
+        title_text="Execution price",
+        tickformat=f",.{price_decimals}f",
+    )
     return figure
 
 
@@ -820,6 +843,22 @@ def _number(value: str) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _price_decimals(values: Iterable[float]) -> int:
+    magnitudes = [abs(value) for value in values if value]
+    if not magnitudes:
+        return 2
+    smallest = min(magnitudes)
+    if smallest >= 100:
+        return 2
+    if smallest >= 1:
+        return 4
+    if smallest >= 0.01:
+        return 6
+    if smallest >= 0.0001:
+        return 8
+    return 10
 
 
 def _quality_rows(items: Iterable) -> dmc.Stack:
@@ -1025,7 +1064,15 @@ def _style_figure(figure: go.Figure, *, height: int, margins: dict[str, int]) ->
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font={"family": "Inter, system-ui, sans-serif", "color": COLORS["muted"], "size": 10},
-        hoverlabel={"bgcolor": COLORS["surface_alt"], "bordercolor": COLORS["border"]},
+        hoverlabel={
+            "bgcolor": "#102b3b",
+            "bordercolor": COLORS["blue"],
+            "font": {
+                "color": "#f4f9fc",
+                "family": "Inter, system-ui, sans-serif",
+                "size": 12,
+            },
+        },
         showlegend=False,
     )
     figure.update_xaxes(

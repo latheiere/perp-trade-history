@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from perp_trade_history.dashboard.models import DashboardFilters, NotableChange, empty_snapshot
+from perp_trade_history.dashboard.models import (
+    DashboardFilters,
+    ExposureBand,
+    NotableChange,
+    empty_snapshot,
+)
 from perp_trade_history.dashboard.providers import SyntheticSnapshotProvider
 from perp_trade_history.dashboard.views import (
     _cashflow_figure,
     _execution_figure,
+    _price_decimals,
     collection_build_report,
     data_quality_cards,
     episode_detail,
     episode_rows,
+    exposure_panel,
     heatmap_figure,
     notable_changes,
     performance_figure,
@@ -97,6 +104,39 @@ def test_episode_views_present_supported_economics_and_source_details() -> None:
     assert "Result distribution (R)" not in annual
 
 
+def test_execution_price_chart_uses_visible_hover_and_magnitude_precision() -> None:
+    snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
+    figure = _execution_figure(snapshot.episodes[0].executions)
+
+    assert figure.layout.hoverlabel.font.color == "#f4f9fc"
+    assert figure.layout.hoverlabel.bgcolor == "#102b3b"
+    assert figure.layout.yaxis.tickformat in {",.2f", ",.4f", ",.6f", ",.8f", ",.10f"}
+    assert "%{customdata[4]}" in figure.data[0].hovertemplate
+    assert _price_decimals((125.0,)) == 2
+    assert _price_decimals((1.25,)) == 4
+    assert _price_decimals((0.021375,)) == 6
+    assert _price_decimals((0.00021,)) == 8
+
+
+def test_exposure_rows_repeat_duration_labels_and_color_by_result() -> None:
+    item = ExposureBand(
+        "1h – 1d",
+        "1h_to_1d",
+        3,
+        7.18,
+        8,
+        -743.59,
+        -538.83,
+    )
+    rendered = exposure_panel((item,), "Avg USDT", "Avg USDT")
+    text = _text(rendered)
+    classes = _class_names(rendered)
+
+    assert text.count("1h – 1d") == 3
+    assert classes.count("metric-bar-fill positive") == 1
+    assert classes.count("metric-bar-fill negative") == 2
+
+
 def test_quality_area_separates_source_coverage_and_episode_boundaries() -> None:
     snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
 
@@ -109,3 +149,16 @@ def test_quality_area_separates_source_coverage_and_episode_boundaries() -> None
     assert "Unsupported metrics" not in rendered
     assert "Collection build report" in _text(report)
     assert report.value is None
+
+
+def _class_names(component: object) -> list[str]:
+    names: list[str] = []
+    class_name = getattr(component, "className", None)
+    if isinstance(class_name, str):
+        names.append(class_name)
+    children = getattr(component, "children", None)
+    candidates = children if isinstance(children, (list, tuple)) else [children]
+    for child in candidates:
+        if child is not None:
+            names.extend(_class_names(child))
+    return names

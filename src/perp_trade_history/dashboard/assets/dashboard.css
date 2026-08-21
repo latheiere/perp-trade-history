@@ -454,17 +454,27 @@ body {
   background: var(--dashboard-green);
 }
 
-.metric-bar-fill.short,
+.metric-bar-fill.negative,
 .attribution-fill.negative {
   background: var(--dashboard-red);
 }
 
-.metric-bar-fill.net {
-  background: #4f8c6e;
+.metric-bar-fill.positive {
+  background: var(--dashboard-green);
+}
+
+.metric-bar-fill.neutral {
+  background: #365263;
 }
 
 .net-row {
-  grid-template-columns: minmax(84px, 1fr) 42px;
+  grid-template-columns: 58px minmax(64px, 1fr) 42px;
+}
+
+.js-plotly-plot .hoverlayer .hovertext text,
+.js-plotly-plot .hoverlayer .axistext text,
+.js-plotly-plot .hoverlayer .legendtext {
+  fill: #f4f9fc !important;
 }
 
 .year-section {

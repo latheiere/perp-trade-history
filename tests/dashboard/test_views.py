@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import dash_ag_grid as dag
+import dash_mantine_components as dmc
+
 from perp_trade_history.dashboard.models import (
     DashboardFilters,
     ExposureBand,
@@ -105,6 +110,28 @@ def test_episode_views_present_supported_economics_and_source_details() -> None:
     assert "Result distribution (R)" not in annual
 
 
+def test_episode_detail_defers_inactive_panels_and_virtualizes_evidence_rows() -> None:
+    snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
+    original = snapshot.episodes[0]
+    episode = replace(
+        original,
+        executions=original.executions * 150,
+        cashflows=original.cashflows * 150,
+    )
+
+    detail = episode_detail(episode)
+    tabs = _components(detail, dmc.Tabs)
+    grids = _components(detail, dag.AgGrid)
+
+    assert len(tabs) == 1
+    assert tabs[0].keepMounted is False
+    assert len(grids) == 2
+    assert len(grids[0].rowData) == len(episode.executions)
+    assert len(grids[1].rowData) == len(episode.cashflows)
+    assert all(grid.dashGridOptions["rowBuffer"] == 4 for grid in grids)
+    assert all(grid.style["height"] == "320px" for grid in grids)
+
+
 def test_execution_price_chart_uses_visible_hover_and_magnitude_precision() -> None:
     snapshot = SyntheticSnapshotProvider().load(DashboardFilters())
     figure = _execution_figure(snapshot.episodes[0].executions)
@@ -168,3 +195,13 @@ def _class_names(component: object) -> list[str]:
         if child is not None:
             names.extend(_class_names(child))
     return names
+
+
+def _components(component: object, component_type: type) -> list[object]:
+    matches = [component] if isinstance(component, component_type) else []
+    children = getattr(component, "children", None)
+    candidates = children if isinstance(children, (list, tuple)) else [children]
+    for child in candidates:
+        if child is not None:
+            matches.extend(_components(child, component_type))
+    return matches

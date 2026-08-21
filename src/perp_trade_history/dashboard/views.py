@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import dash_ag_grid as dag
 import dash_mantine_components as dmc
 import plotly.graph_objects as go
 from dash import dcc, html
@@ -32,6 +33,15 @@ COLORS = {
     "green": "#58c484",
     "red": "#ff5753",
 }
+
+DETAIL_GRID_THEME = (
+    "themeQuartz.withParams({"
+    "backgroundColor:'#0b1b27',foregroundColor:'#d9e7f0',accentColor:'#2ea8ff',"
+    "headerTextColor:'#8194a3',headerBackgroundColor:'#0d202d',"
+    "oddRowBackgroundColor:'#0d1f2b',borderColor:'#1b3342',"
+    "rowBorderColor:'#1b3342',fontSize:11,spacing:5,wrapperBorderRadius:0"
+    "})"
+)
 
 
 def kpi_cards(items: Iterable[Kpi]) -> list[dmc.Paper]:
@@ -333,8 +343,7 @@ def _net_column(rows: list[ExposureBand], net_label: str) -> dmc.Box:
                             html.Div(
                                 html.Div(
                                     className=(
-                                        "metric-bar-fill "
-                                        + _outcome_class(item.net_average)
+                                        "metric-bar-fill " + _outcome_class(item.net_average)
                                     ),
                                     style={
                                         "width": (
@@ -665,6 +674,7 @@ def episode_detail(episode: Episode | None) -> dmc.Box:
                     ),
                 ],
                 value="overview",
+                keepMounted=False,
                 className="detail-tabs",
             ),
         ],
@@ -831,13 +841,31 @@ def _cashflow_figure(items: Iterable[CashflowDetail]) -> go.Figure:
 
 
 def _detail_table(headers: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> html.Div:
+    values = list(rows)
+    fields = [f"column_{index}" for index in range(len(headers))]
+    row_data = [dict(zip(fields, row, strict=True)) for row in values]
+    grid_height = min(320, max(90, 35 * (len(row_data) + 1)))
     return html.Div(
-        html.Table(
-            [
-                html.Thead(html.Tr([html.Th(header) for header in headers])),
-                html.Tbody([html.Tr([html.Td(value) for value in row]) for row in rows]),
+        dag.AgGrid(
+            columnDefs=[
+                {
+                    "headerName": header,
+                    "field": field,
+                    "minWidth": 105,
+                    "sortable": True,
+                    "resizable": True,
+                }
+                for header, field in zip(headers, fields, strict=True)
             ],
-            className="detail-data-table",
+            rowData=row_data,
+            dashGridOptions={
+                "theme": {"function": DETAIL_GRID_THEME},
+                "animateRows": False,
+                "suppressCellFocus": True,
+                "rowBuffer": 4,
+            },
+            style={"height": f"{grid_height}px", "width": "100%"},
+            className="detail-evidence-grid",
         ),
         className="detail-table-scroll",
     )

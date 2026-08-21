@@ -649,29 +649,8 @@ body {
   overflow-x: auto;
 }
 
-.detail-data-table {
-  width: 100%;
+.detail-evidence-grid {
   min-width: 640px;
-  border-collapse: collapse;
-  font-size: 9px;
-}
-
-.detail-data-table th,
-.detail-data-table td {
-  padding: 8px 7px;
-  text-align: left;
-  white-space: nowrap;
-  border-bottom: 1px solid var(--dashboard-border);
-}
-
-.detail-data-table th {
-  color: var(--dashboard-muted);
-  background: var(--dashboard-surface-alt);
-  font-weight: 650;
-}
-
-.detail-data-table td {
-  color: #b9c8d1;
 }
 
 .attribution-label {

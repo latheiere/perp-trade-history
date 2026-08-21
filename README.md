@@ -13,6 +13,11 @@ Perp Trade History gives you:
 - Visible source gaps and episode-quality warnings
 - Local storage and account credentials that never need trading permissions
 
+![Multi-year performance dashboard built from synthetic trade history](docs/images/dashboard-overview.jpg)
+
+_The built-in sample history shows the real dashboard with synthetic data; no account
+data is included._
+
 ## Quick start
 
 Python 3.11 or newer is required.
@@ -56,6 +61,13 @@ make history
 
 The dashboard notices updated data automatically.
 
+## From pattern to evidence
+
+Select a weekday-hour cell, exposure row, or episode to move from a performance
+pattern to its underlying executions and cashflows.
+
+![Episode ledger and execution drill-down built from synthetic trade history](docs/images/dashboard-episode-detail.jpg)
+
 ## Learn more
 
 - [Use the dashboard](docs/dashboard.md)
@@ -63,6 +75,21 @@ The dashboard notices updated data automatically.
 - [Extend older history with account archives](docs/binance-archive-backfill.md)
 - [Choose and rebuild the reporting currency](docs/conversion.md)
 - [Add optional unattended operation](docs/optional-extensions.md)
+
+## Get help
+
+Check configuration and local data access first:
+
+```bash
+.venv/bin/perp-trade-history \
+  --config config/config.toml \
+  --secrets config/credentials.env \
+  doctor
+```
+
+If the problem remains, [open a GitHub issue](https://github.com/latheiere/perp-trade-history/issues)
+with the command you ran, the sanitized error, your Python version, and the affected
+adapter. Never include credentials, signed URLs, or account identifiers.
 
 ## License
 

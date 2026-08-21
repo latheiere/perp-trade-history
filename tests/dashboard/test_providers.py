@@ -124,14 +124,20 @@ def test_synthetic_provider_is_deterministic_and_filterable() -> None:
         DashboardFilters(
             market_class="perpetual derivatives",
             direction="long",
-            query="trend",
+            query="ambiguous",
         )
     )
 
     assert first == provider.load(DashboardFilters())
     assert second.episodes
-    assert all(item.direction == "Long" and "Trend" in item.tags for item in second.episodes)
+    assert all(
+        item.direction == "Long" and "Ambiguous Tie Order" in item.tags for item in second.episodes
+    )
     assert any(item.confidence == "Low confidence" for item in first.notable_changes)
+    assert len(first.episodes) == 240
+    assert first.performance[-1].net == 20_514.0
+    assert any(item.period < 0 for item in first.performance)
+    assert any(item.net_result is not None and item.net_result < 0 for item in first.years)
 
 
 def test_analytics_provider_uses_file_identity_and_only_exposes_trade_supported_metrics(
@@ -190,9 +196,7 @@ def test_analytics_provider_derives_safe_cashflow_patterns(tmp_path, monkeypatch
     assert snapshot.episodes[0].net_result == 5.0
 
 
-def test_analytics_provider_reuses_canonical_snapshot_across_filters(
-    tmp_path, monkeypatch
-) -> None:
+def test_analytics_provider_reuses_canonical_snapshot_across_filters(tmp_path, monkeypatch) -> None:
     store = DataStore(tmp_path)
     provider = AnalyticsSnapshotProvider(store, reporting_currency="Reporting currency")
     builds = 0

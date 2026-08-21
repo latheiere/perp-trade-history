@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from threading import RLock
@@ -1012,13 +1012,25 @@ def _aggregate_performance_points(
 
 
 def _synthetic_performance() -> tuple[PerformancePoint, ...]:
+    monthly_pattern = (620, -340, 980, 1450, -780, 410, 1260, -920, 730, 560, -480, 1050)
     running = Decimal(0)
     peak = Decimal(0)
     recent: list[Decimal] = []
     points: list[PerformancePoint] = []
     for index, month_index in enumerate(range(2021 * 12, 2026 * 12 + 8)):
         year, month_zero = divmod(month_index, 12)
-        amount = Decimal(3850 + ((index % 7) - 3) * 2100)
+        amount = Decimal(monthly_pattern[index % len(monthly_pattern)])
+        amount += Decimal(30 + ((index % 5) - 2) * 110)
+        if index == 23:
+            amount -= Decimal(6600)
+        elif index == 42:
+            amount -= Decimal(2200)
+        elif index == 57:
+            amount -= Decimal(1800)
+        elif index in {26, 30, 48, 52}:
+            amount += Decimal(1000)
+        elif index == 67:
+            amount += Decimal(24)
         running += amount
         peak = max(peak, running)
         recent.append(amount)
@@ -1037,30 +1049,27 @@ def _synthetic_performance() -> tuple[PerformancePoint, ...]:
 def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
     performance = _synthetic_performance()
     heat_values = tuple(
-        tuple(round((((row * 5 + column * 3) % 17) - 8) / 8, 2) for column in range(12))
+        tuple(round((((row * 5 + column * 3) % 17) - 8) * 18.5, 2) for column in range(12))
         for row in range(7)
     )
-    episodes = tuple(_episode(index) for index in range(1, 19))
-    years = (
-        YearSummary("2021", 212, 28743, 18.6, 87.3, (1, 2, 4, 6, 8, 5, 3, 7, 11, 8, 4), "2h 18m"),
-        YearSummary("2022", 314, -18952, -11.3, 78.1, (2, 4, 8, 10, 7, 5, 3, 4, 6, 3, 1), "1h 47m"),
-        YearSummary("2023", 326, 36128, 20.4, 85.4, (1, 2, 3, 5, 7, 8, 11, 8, 5, 3, 2), "2h 06m"),
-        YearSummary("2024", 342, 54321, 26.1, 91.2, (1, 2, 3, 4, 7, 10, 12, 9, 5, 3, 2), "2h 32m"),
-        YearSummary("2025", 336, 59874, 25.7, 93.6, (1, 1, 2, 4, 6, 9, 13, 10, 7, 4, 2), "2h 41m"),
-        YearSummary(
-            "2026 YTD", 312, 18628, 12.7, 94.9, (0, 1, 2, 3, 5, 8, 14, 9, 6, 3, 1), "2h 55m"
-        ),
+    episodes = _rebalance_synthetic_episodes(
+        tuple(_episode(index) for index in range(1, 241)), performance
     )
+    closed = tuple(item for item in episodes if item.status == "Closed")
+    wins = sum(item.outcome == "Win" for item in closed)
+    attributed = tuple(item for item in closed if item.net_result is not None)
+    total = sum((item.net_result or 0.0) for item in attributed)
+    years = _synthetic_years(episodes)
     return DashboardSnapshot(
         revision=revision,
         refreshed_label="Refreshed 2m ago",
         timezone="America/New_York",
         date_range="Jan 1, 2021 – Aug 21, 2026",
-        currency="Reporting currency",
+        currency="USDT",
         profiles=(
             FilterOption("All profiles", "all"),
-            FilterOption("Discretionary", "discretionary"),
-            FilterOption("Systematic", "systematic"),
+            FilterOption("Binance", "binance"),
+            FilterOption("Gate", "gate"),
         ),
         market_classes=(
             FilterOption("All market classes", "all"),
@@ -1072,14 +1081,20 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
         kpis=(
             Kpi(
                 "Attributed cashflow",
-                "+268,742.31",
-                "1,842 episodes",
+                f"{total:+,.2f} USDT",
+                f"{len(attributed):,} episodes",
                 "Comparable amounts",
                 "positive",
             ),
-            Kpi("Closed episodes", "1,842", "Observed", "Reconstructed", "info"),
-            Kpi("Win rate", "62.3%", "1,147 wins", "1,842 closed episodes", "positive"),
-            Kpi("Median duration", "2h 41m", "Closed episodes", "Observed holding time", "info"),
+            Kpi("Closed episodes", f"{len(closed):,}", "Observed", "Reconstructed", "info"),
+            Kpi(
+                "Win rate",
+                f"{wins / len(attributed) * 100:.1f}%",
+                f"{wins:,} wins",
+                f"{len(attributed):,} closed episodes",
+                "positive",
+            ),
+            Kpi("Median duration", "18h 32m", "Closed episodes", "Observed holding time", "info"),
         ),
         performance=performance,
         notable_changes=(
@@ -1087,7 +1102,7 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
                 1,
                 "Drawdown profile improved",
                 "Peak decline narrowed across comparable expansion windows.",
-                612,
+                74,
                 "High confidence",
                 "positive",
             ),
@@ -1095,7 +1110,7 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
                 2,
                 "Win rate increased",
                 "Outcome consistency improved while sample depth remained broad.",
-                1104,
+                126,
                 "High confidence",
                 "positive",
             ),
@@ -1103,7 +1118,7 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
                 3,
                 "Overnight exposure increased",
                 "Long-horizon exposure grew across the latest evaluation window.",
-                453,
+                52,
                 "Low confidence",
                 "negative",
             ),
@@ -1113,32 +1128,32 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
             weekdays=("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
             values=heat_values,
             metric_label="Performance by weekday & hour (average comparable cashflow)",
-            unit="reporting currency",
+            unit="USDT",
         ),
         exposure=tuple(
             ExposureBand(label, key, long_count, long_average, short_count, short_average, net)
             for label, key, long_count, long_average, short_count, short_average, net in (
-                ("Under 1h", "under_1h", 326, 18.0, 298, -3.0, 15.0),
-                ("1h – 1d", "1h_to_1d", 412, 32.0, 389, 6.0, 26.0),
-                ("1d – 7d", "1d_to_7d", 176, 63.0, 148, 12.0, 51.0),
-                ("7d – 30d", "7d_to_30d", 42, 41.0, 36, 8.0, 32.0),
-                ("30d+", "30d_or_more", 12, 74.0, 9, 18.0, 56.0),
+                ("Under 1h", "under_1h", 31, 42.0, 28, -18.0, 13.0),
+                ("1h – 1d", "1h_to_1d", 45, 28.0, 43, 7.0, 18.0),
+                ("1d – 7d", "1d_to_7d", 27, 61.0, 25, -22.0, 20.0),
+                ("7d – 30d", "7d_to_30d", 13, -35.0, 12, 16.0, -10.0),
+                ("30d+", "30d_or_more", 9, -72.0, 7, 24.0, -30.0),
             )
         ),
         years=years,
         episodes=episodes,
         coverage=CoverageSummary(
-            98.7,
-            1816,
-            1842,
+            96.7,
+            232,
+            240,
             "Jan 1, 2021 – Aug 21, 2026",
-            1824,
-            10,
-            8,
+            222,
+            12,
+            6,
         ),
         coverage_gaps=(
             CoverageGap(
-                "Example profile",
+                "Gate",
                 "Perpetual derivatives",
                 "Jan 08, 2022 00:00 EST",
                 "Jan 09, 2022 00:00 EST",
@@ -1158,79 +1173,290 @@ def _synthetic_snapshot(revision: str) -> DashboardSnapshot:
 
 
 def _episode(index: int) -> Episode:
-    positive = index % 3 != 2
+    opened_at = datetime(2026, 8, 18, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+    opened_at -= timedelta(days=(index - 1) * 8 + (index - 1) // 2)
+    opened_at = opened_at.replace(hour=(index * 7) % 24, minute=(index * 13) % 60)
+    is_open = index % 20 == 0
+    is_flat = not is_open and index % 37 == 0
+    positive = index % 5 in {0, 1, 3}
     direction = "Long" if index % 2 else "Short"
-    profile = "Discretionary" if index % 3 else "Systematic"
-    net_result = round((17 + (index % 7) * 29) * (1 if positive else -1), 2)
-    hours = (index * 3) % 24
-    day = 21 - index // 3
-    duration_bucket, duration = (
-        ("under_1h", f"{20 + index * 3}m")
-        if index % 4 == 1
-        else ("1h_to_1d", f"{1 + index % 5}h {index * 7 % 60}m")
-        if index % 4 in {0, 2}
-        else ("1d_to_7d", f"1d {index % 8}h")
+    profile = "Binance" if index % 3 else "Gate"
+    net_result = (
+        None
+        if is_open
+        else 0.0
+        if is_flat
+        else float(97 + (index * 37) % 420)
+        if positive
+        else float(-(60 + (index * 53) % 300))
     )
-    opened = f"Aug {day:02d}, 2026 {hours:02d}:{(index * 11) % 60:02d} EDT"
+    duration_bucket, duration, duration_minutes = (
+        ("under_1h", f"{18 + index % 40}m", 18 + index % 40)
+        if index % 5 == 0
+        else (
+            "1h_to_1d",
+            f"{2 + index % 19}h {index * 7 % 60}m",
+            (2 + index % 19) * 60 + index * 7 % 60,
+        )
+        if index % 5 == 1
+        else (
+            "1d_to_7d",
+            f"{1 + index % 6}d {index % 18}h",
+            ((1 + index % 6) * 24 + index % 18) * 60,
+        )
+        if index % 5 == 2
+        else (
+            "7d_to_30d",
+            f"{8 + index % 20}d {index % 12}h",
+            ((8 + index % 20) * 24 + index % 12) * 60,
+        )
+        if index % 5 == 3
+        else ("30d_or_more", f"{32 + index % 45}d", (32 + index % 45) * 24 * 60)
+    )
+    closed_at = opened_at + timedelta(minutes=duration_minutes)
+    instruments = (
+        ("BTC-USDT", Decimal("68420")),
+        ("ETH-USDT", Decimal("3275")),
+        ("DOGE-USDT", Decimal("0.12640")),
+        ("SOL-USDT", Decimal("174.20")),
+        ("PEPE-USDT", Decimal("0.00002135")),
+    )
+    instrument, base_price = instruments[(index - 1) % len(instruments)]
+    entry_price = base_price * (Decimal(1) + Decimal((index % 11) - 5) / Decimal(1000))
+    price_move = Decimal("0.006") + Decimal(index % 7) / Decimal(1000)
+    if not positive and not is_flat:
+        price_move *= Decimal(-1)
+    if direction == "Short":
+        price_move *= Decimal(-1)
+    exit_price = entry_price * (Decimal(1) + price_move)
+    opened = opened_at.strftime("%b %d, %Y %H:%M %Z")
+    closed = closed_at.strftime("%b %d, %Y %H:%M %Z")
+    execution_count = 2 + index % 6
+    executions = _synthetic_executions(
+        index,
+        opened_at,
+        closed_at,
+        direction,
+        entry_price,
+        exit_price,
+        execution_count,
+        is_open,
+    )
+    flags = []
+    if index % 23 == 0:
+        flags.append("Ambiguous Tie Order")
+    if index % 31 == 0:
+        flags.append("Mixed Quantity Units")
+    if index % 41 == 0:
+        flags.append("Left Censored")
+    if is_open:
+        flags.append("Right Censored")
+    outcome = "Open" if is_open else "Flat" if is_flat else "Win" if positive else "Loss"
+    fee = round(1.25 + index % 9 * 0.37, 2)
+    cashflows = _synthetic_cashflows(index, closed, net_result, fee, is_open)
     return Episode(
         episode_id=f"episode-{index:03d}",
         occurred_at=opened,
         profile=profile,
         market_class="Perpetual derivatives",
-        instrument=f"INSTRUMENT-{index % 5 + 1}",
-        status="Closed",
+        instrument=instrument,
+        status="Open" if is_open else "Closed",
         direction=direction,
         duration=duration,
         duration_bucket=duration_bucket,
-        entry=f"{100 + index * 1.25:.2f}",
-        exit=f"{101 + index * 1.1:.2f}",
-        outcome="Win" if positive else "Loss",
+        entry=_display_decimal(str(entry_price)),
+        exit="Open" if is_open else _display_decimal(str(exit_price)),
+        outcome=outcome,
         net_result=net_result,
-        result_currency="Reporting currency",
-        tags=("Breakout", "Trend") if index % 2 else ("Mean reversion",),
-        executions=(
-            ExecutionDetail(
-                opened,
-                "Open",
-                "Buy" if direction == "Long" else "Sell",
-                f"{100 + index * 1.25:.2f}",
-                "1",
-                "base",
-                f"{100 + index * 1.25:.2f}",
-                "0.10",
-                "Reporting currency",
-                f"order-{index:03d}-open",
+        result_currency="USDT" if net_result is not None else "",
+        tags=tuple(flags) or ("No flags",),
+        executions=executions,
+        cashflows=cashflows,
+        quality=(
+            QualityIndicator(
+                "Boundary status",
+                "Right censored"
+                if is_open
+                else "Left censored"
+                if "Left Censored" in flags
+                else "Complete",
+                "info" if is_open else "negative" if "Left Censored" in flags else "positive",
             ),
-            ExecutionDetail(
-                opened,
-                "Close",
-                "Sell" if direction == "Long" else "Buy",
-                f"{101 + index * 1.1:.2f}",
-                "1",
-                "base",
-                f"{101 + index * 1.1:.2f}",
-                "0.10",
-                "Reporting currency",
-                f"order-{index:03d}-close",
-            ),
+            QualityIndicator("Source coverage", "Complete"),
+            QualityIndicator("Execution count", str(execution_count), "info"),
+            QualityIndicator("Order count", str(max(2, execution_count - 1)), "info"),
         ),
-        cashflows=(
+        confidence="Low" if flags else "High",
+        samples=execution_count,
+    )
+
+
+def _synthetic_executions(
+    index: int,
+    opened_at: datetime,
+    closed_at: datetime,
+    direction: str,
+    entry_price: Decimal,
+    exit_price: Decimal,
+    count: int,
+    is_open: bool,
+) -> tuple[ExecutionDetail, ...]:
+    details: list[ExecutionDetail] = []
+    side_open = "Buy" if direction == "Long" else "Sell"
+    side_close = "Sell" if direction == "Long" else "Buy"
+    span = max((closed_at - opened_at).total_seconds(), 60)
+    for position in range(count):
+        ratio = Decimal(position) / Decimal(max(count - 1, 1))
+        occurred_at = opened_at + timedelta(seconds=float(Decimal(str(span)) * ratio))
+        price = entry_price + (exit_price - entry_price) * ratio
+        closing = position == count - 1 and not is_open
+        reducing = position > count // 2
+        transition = (
+            "Close" if closing else "Reduce" if reducing else "Open" if position == 0 else "Add"
+        )
+        side = side_close if reducing or closing else side_open
+        quantity = Decimal("0.25") + Decimal((index + position) % 5) / Decimal(10)
+        details.append(
+            ExecutionDetail(
+                occurred_at.strftime("%b %d, %Y %H:%M %Z"),
+                transition,
+                side,
+                _display_decimal(str(price)),
+                _display_decimal(str(quantity)),
+                "base",
+                _display_decimal(str(price * quantity)),
+                f"{0.18 + (index + position) % 7 * 0.09:.2f}",
+                "USDT",
+                f"order-{index:03d}-{position + 1:02d}",
+            )
+        )
+    return tuple(details)
+
+
+def _synthetic_cashflows(
+    index: int,
+    occurred_at: str,
+    net_result: float | None,
+    fee: float,
+    is_open: bool,
+) -> tuple[CashflowDetail, ...]:
+    funding = round(((index % 7) - 3) * 0.42, 2)
+    rows = [
+        CashflowDetail(
+            occurred_at,
+            "Commission",
+            f"{-fee:.2f}",
+            "USDT",
+            f"{-fee:.2f}",
+            "USDT",
+            "Execution link",
+        ),
+        CashflowDetail(
+            occurred_at,
+            "Funding",
+            f"{funding:.2f}",
+            "USDT",
+            f"{funding:.2f}",
+            "USDT",
+            "Position interval",
+        ),
+    ]
+    if not is_open and net_result is not None:
+        realized = net_result + fee - funding
+        rows.insert(
+            0,
             CashflowDetail(
-                opened,
+                occurred_at,
                 "Realized result",
-                str(net_result),
-                "Reporting currency",
-                str(net_result),
-                "Reporting currency",
+                f"{realized:.2f}",
+                "USDT",
+                f"{realized:.2f}",
+                "USDT",
                 "Execution link",
             ),
-        ),
-        quality=(
-            QualityIndicator("Boundary status", "Complete"),
-            QualityIndicator("Source coverage", "Complete"),
-            QualityIndicator("Execution count", "2", "info"),
-            QualityIndicator("Order count", "2", "info"),
-        ),
-        confidence="High",
-        samples=2,
-    )
+        )
+    return tuple(rows)
+
+
+def _synthetic_years(episodes: tuple[Episode, ...]) -> tuple[YearSummary, ...]:
+    grouped: dict[int, list[Episode]] = defaultdict(list)
+    for episode in episodes:
+        if episode.status == "Closed":
+            grouped[_synthetic_episode_datetime(episode).year].append(episode)
+    cards: list[YearSummary] = []
+    prior_total: float | None = None
+    for year, rows in sorted(grouped.items()):
+        values = [item.net_result for item in rows if item.net_result is not None]
+        total = float(sum(values))
+        distribution = tuple(
+            sum(lower <= value < upper for value in values)
+            for lower, upper in (
+                (float("-inf"), -100.0),
+                (-100.0, -25.0),
+                (-25.0, 0.0),
+                (0.0, 25.0),
+                (25.0, 100.0),
+                (100.0, float("inf")),
+            )
+        )
+        change = None
+        if prior_total not in {None, 0.0}:
+            change = (total - prior_total) / abs(prior_total) * 100
+        cards.append(
+            YearSummary(
+                f"{year} YTD" if year == 2026 else str(year),
+                len(rows),
+                total,
+                change,
+                sum(value > 0 for value in values) / len(values) * 100,
+                distribution,
+                ("11h 24m", "1d 8h", "18h 32m", "2d 3h", "14h 18m", "1d 2h")[len(cards)],
+                "Net cashflow",
+            )
+        )
+        prior_total = total
+    return tuple(cards)
+
+
+def _rebalance_synthetic_episodes(
+    episodes: tuple[Episode, ...], performance: tuple[PerformancePoint, ...]
+) -> tuple[Episode, ...]:
+    target_by_year: dict[int, Decimal] = defaultdict(Decimal)
+    for point in performance:
+        target_by_year[int(point.timestamp[:4])] += Decimal(str(point.period))
+
+    indexes_by_year: dict[int, list[int]] = defaultdict(list)
+    result = list(episodes)
+    for position, episode in enumerate(result):
+        if episode.net_result is not None:
+            indexes_by_year[_synthetic_episode_datetime(episode).year].append(position)
+
+    for year, indexes in indexes_by_year.items():
+        observed = sum(Decimal(str(result[position].net_result)) for position in indexes)
+        remaining_cents = int((target_by_year[year] - observed) * 100)
+        share, residual = divmod(abs(remaining_cents), len(indexes))
+        sign = 1 if remaining_cents >= 0 else -1
+        for offset, position in enumerate(indexes):
+            adjustment_cents = sign * (share + (1 if offset < residual else 0))
+            episode = result[position]
+            adjusted = Decimal(str(episode.net_result)) + Decimal(adjustment_cents) / 100
+            outcome = "Win" if adjusted > 0 else "Loss" if adjusted < 0 else "Flat"
+            cashflows = tuple(
+                replace(
+                    item,
+                    amount=f"{Decimal(item.amount) + Decimal(adjustment_cents) / 100:.2f}",
+                    reporting_amount=(
+                        f"{Decimal(item.reporting_amount) + Decimal(adjustment_cents) / 100:.2f}"
+                    ),
+                )
+                if item.event_type == "Realized result"
+                else item
+                for item in episode.cashflows
+            )
+            result[position] = replace(
+                episode,
+                net_result=float(adjusted),
+                outcome=outcome,
+                cashflows=cashflows,
+            )
+    return tuple(result)

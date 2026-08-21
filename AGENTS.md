@@ -14,8 +14,6 @@ who may know Python and trading but does not know this repository.
 - State required permissions and destructive boundaries next to the relevant action.
 - Do not put implementation rationale, proposed extensions, internal component
   choices, or contributor workflow in public user guides.
-- Keep maintainer architecture and quality guidance in this file or an explicitly
-  maintainer-only document such as `design-qa.md`.
 - Preserve the existing documentation structure unless a new user task cannot fit an
   existing guide.
 
@@ -36,17 +34,6 @@ who may know Python and trading but does not know this repository.
 - Ambiguous events remain visible through quality flags rather than being hidden by
   an unsupported estimate.
 
-## Dashboard architecture
-
-- Keep the dashboard as a scrollable Dash, Mantine, and Plotly application.
-- Reuse the in-memory analytical snapshot for interactive filters and invalidate it
-  when canonical data files change.
-- Use coordinated filters for summary-to-episode drill-downs.
-- Virtualize high-cardinality evidence grids and avoid mounting inactive heavy
-  panels.
-- Format values for display without discarding machine-readable numeric values.
-- Keep outcome colors independent from position direction.
-
 ## Development checks
 
 Install development dependencies and run the standard checks with:
@@ -57,9 +44,9 @@ python -m pytest
 ruff check .
 ```
 
-Dashboard changes must also follow `design-qa.md`. Before publishing documentation,
-check Markdown links, confirm every command against the current CLI, and remove stale
-implementation or future-development narrative from public guides.
+Before publishing documentation, check Markdown links, confirm every command against
+the current CLI, and remove stale implementation or future-development narrative
+from public guides.
 
 When reporting a defect, include the affected system area, triggering conditions,
 observed behavior, sanitized error, and relevant environment version. Never include

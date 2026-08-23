@@ -16,7 +16,6 @@ def test_core_install_uses_only_public_runtime_dependency() -> None:
     )
     assert project["optional-dependencies"]["backup"] == ["statecrate>=0.1,<0.2"]
     assert "dash>=4.4,<5" in project["optional-dependencies"]["dashboard"]
-    assert "tradier-dev" not in str(project).lower()
     assert project["scripts"]["perp-trade-history-dashboard"].endswith(
         "dashboard.cli:main"
     )

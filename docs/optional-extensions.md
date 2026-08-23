@@ -60,8 +60,8 @@ independently of collection.
 
 ## Use a managed local installation
 
-`runtime-contract.yaml` describes the collector and dashboard processes for a local
-installation manager such as `tradier-dev`. A managed upgrade can replace the
+`runtime-contract.yaml` describes the collector and dashboard processes for
+environment tooling. A managed upgrade can replace the
 application release while preserving configuration, credentials, collected data,
 and backups.
 

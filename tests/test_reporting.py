@@ -105,7 +105,7 @@ def _coverage(
     )
 
 
-def test_report_groups_primary_cashflows_without_informational_double_count(tmp_path: Path) -> None:
+def test_report_groups_primary_cashflows_without_supplemental_double_count(tmp_path: Path) -> None:
     store = DataStore(tmp_path)
     store.upsert(
         "cashflows",
@@ -130,7 +130,7 @@ def test_report_groups_primary_cashflows_without_informational_double_count(tmp_
                 time_ms="1768867200000",
                 currency="QUOTE",
                 amount="9",
-                role="informational",
+                role="supplemental",
             ),
         ],
     )
@@ -148,69 +148,6 @@ def test_report_groups_primary_cashflows_without_informational_double_count(tmp_
             "amount": "1",
             "events": 2,
         }
-    ]
-
-
-def test_report_uses_adapter_roles_consistently_across_venues(tmp_path: Path) -> None:
-    store = DataStore(tmp_path)
-    store.upsert(
-        "cashflows",
-        [
-            _flow(
-                "primary-a",
-                time="2026-01-02T00:00:00.000Z",
-                time_ms="1767312000000",
-                currency="QUOTE",
-                amount="1",
-                venue="primary-complete",
-            ),
-            _flow(
-                "summary-a",
-                time="2026-01-02T00:00:00.000Z",
-                time_ms="1767312000000",
-                currency="QUOTE",
-                amount="1",
-                role="informational",
-                venue="primary-complete",
-            ),
-            _flow(
-                "summary-b",
-                time="2026-01-02T00:00:00.000Z",
-                time_ms="1767312000000",
-                currency="QUOTE",
-                amount="4",
-                role="primary",
-                venue="summary-required",
-            ),
-            _flow(
-                "informational-b",
-                time="2026-01-02T00:00:00.000Z",
-                time_ms="1767312000000",
-                currency="QUOTE",
-                amount="8",
-                role="informational",
-                venue="summary-required",
-            ),
-        ],
-    )
-
-    rows = pnl_report(
-        store,
-        period="none",
-        group_by=["venue"],
-    )
-
-    assert rows == [
-        {
-            "venue": "primary-complete",
-            "amount": "1",
-            "events": 1,
-        },
-        {
-            "venue": "summary-required",
-            "amount": "4",
-            "events": 1,
-        },
     ]
 
 

@@ -151,7 +151,7 @@ def test_gate_account_book_is_primary_and_fill_is_execution_only() -> None:
     assert "cashflows" not in trade.table_rows
 
 
-def test_gate_position_summary_is_informational() -> None:
+def test_gate_position_summary_is_supplemental() -> None:
     normalized = normalize_gate_position_close(
         {
             "time": 1_700_000_010,
@@ -173,7 +173,7 @@ def test_gate_position_summary_is_informational() -> None:
         settlement="usdt",
     )
     assert normalized.table_rows["positions"][0]["open_price"] == "10"
-    assert normalized.table_rows["cashflows"][0]["reporting_role"] == "informational"
+    assert normalized.table_rows["cashflows"][0]["reporting_role"] == "supplemental"
 
 
 def test_mexc_fill_and_funding_normalize_sign_and_position_action() -> None:
@@ -234,7 +234,7 @@ def test_mexc_fill_parses_string_boolean_liquidity() -> None:
     assert deal.table_rows["executions"][0]["liquidity"] == "maker"
 
 
-def test_mexc_position_components_preserve_net_pnl_as_primary() -> None:
+def test_mexc_position_summary_preserves_legacy_pnl_as_supplemental() -> None:
     normalized = normalize_mexc_position(
         {
             "positionId": 18,
@@ -245,8 +245,6 @@ def test_mexc_position_components_preserve_net_pnl_as_primary() -> None:
             "openAvgPrice": "10",
             "closeAvgPrice": "12",
             "realised": "5",
-            "closeProfitLoss": "5.5",
-            "fee": "-0.3",
             "holdFee": "-0.2",
             "createTime": 1_700_000_000_000,
             "updateTime": 1_700_000_100_000,
@@ -258,10 +256,7 @@ def test_mexc_position_components_preserve_net_pnl_as_primary() -> None:
     assert normalized.table_rows["positions"][0]["status"] == "closed"
     assert {
         row["reporting_role"] for row in normalized.table_rows["cashflows"]
-    } == {"primary"}
-    assert {
-        row["event_type"]: row["amount"] for row in normalized.table_rows["cashflows"]
-    } == {"realized_pnl": "5.5", "funding": "-0.2", "commission": "-0.3"}
+    } == {"supplemental"}
 
 
 def test_gate_historical_position_snapshots_keep_distinct_source_identities() -> None:

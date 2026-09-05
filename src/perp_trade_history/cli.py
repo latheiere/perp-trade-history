@@ -203,6 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="venue,symbol,event_type,currency",
         help=f"Comma-separated fields from: {','.join(sorted(REPORT_FIELDS))}",
     )
+    report.add_argument("--include-supplemental", action="store_true")
     report.add_argument(
         "--include-non-pnl",
         action="store_true",
@@ -467,6 +468,7 @@ def run(argv: list[str] | None = None) -> int:
                 store,
                 period=args.period,
                 group_by=group_by,
+                include_supplemental=args.include_supplemental,
                 include_non_pnl=args.include_non_pnl,
                 start_ms=_time_arg(args.start) if args.start else None,
                 end_ms=_time_arg(args.end) if args.end else None,

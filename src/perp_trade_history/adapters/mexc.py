@@ -20,7 +20,7 @@ from perp_trade_history.models import (
     timestamp_fields,
     utc_now_iso,
 )
-from perp_trade_history.storage import DataStore, raw_record
+from perp_trade_history.storage import raw_record
 
 MEXC_SIDE = {
     1: ("buy", "open_long", "long"),
@@ -128,9 +128,6 @@ MEXC_COVERAGE = {
 
 class MexcAdapter(VenueAdapter):
     name = "mexc"
-
-    def finalize_cashflows(self) -> None:
-        resolve_mexc_cashflows(self.store, self.venue.account_id)
 
     def __init__(self, *args: Any, http: ReadOnlyHttp | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -637,7 +634,6 @@ def normalize_mexc_deal(
                 amount=profit,
                 order_id=payload.get("orderId"),
                 trade_id=source_id,
-                position_id=payload.get("positionId"),
                 collected_at=collected_at,
             )
         )
@@ -657,7 +653,6 @@ def normalize_mexc_deal(
                 amount=negative_magnitude(fee),
                 order_id=payload.get("orderId"),
                 trade_id=source_id,
-                position_id=payload.get("positionId"),
                 collected_at=collected_at,
             )
         )
@@ -940,13 +935,6 @@ def normalize_mexc_position(
     closed_at, closed_ms = (updated_at, updated_ms) if state == 3 else ("", "")
     symbol = str(payload.get("symbol") or "")
     settlement = infer_settlement_currency(symbol)
-    # realised is the net position result, including funding and paid fees.
-    # Preserve that total; totalFee can include fees paid with deductions.
-    net = Decimal(decimal_text(payload.get("realised"), default="0"))
-    funding = Decimal(decimal_text(payload.get("holdFee"), default="0"))
-    fee = Decimal(decimal_text(payload.get("fee"), default="0"))
-    gross = Decimal(decimal_text(payload.get("closeProfitLoss"), default=str(net - funding - fee)))
-    commission = net - gross - funding
     position_side = {1: "long", 2: "short"}.get(int(payload.get("positionType") or 0), "")
     quantity = payload.get("closeVol") if state == 3 else payload.get("holdVol")
     row = row_for(
@@ -967,9 +955,9 @@ def normalize_mexc_position(
         max_quantity=decimal_text(payload.get("closeVol"), default="0"),
         open_price=decimal_text(payload.get("openAvgPrice") or payload.get("holdAvgPrice")),
         close_price=decimal_text(payload.get("closeAvgPrice")),
-        realized_pnl=decimal_text(gross),
-        funding=decimal_text(funding),
-        fees=decimal_text(commission),
+        realized_pnl=decimal_text(payload.get("realised"), default="0"),
+        funding=decimal_text(payload.get("holdFee"), default="0"),
+        fees=decimal_text(payload.get("fee") or payload.get("totalFee"), default="0"),
         settlement_currency=settlement,
         leverage=decimal_text(payload.get("leverage")),
         margin_mode=MEXC_MARGIN_MODE.get(int(payload.get("openType") or 0), ""),
@@ -982,109 +970,48 @@ def normalize_mexc_position(
         collected_at=collected_at,
     )
     cashflows: list[dict[str, str]] = []
-    # Keep zero components so later source revisions can overwrite nonzero amounts.
-    components = (
-        ("realized_pnl", f"position:{source_id}", gross),
-        ("funding", f"position-funding:{source_id}", funding),
-        ("commission", f"position-fee:{source_id}", commission),
-    ) if payload.get("realised") not in (None, "") else ()
-    for event_type, component_id, amount in components:
+    realised = Decimal(decimal_text(payload.get("realised"), default="0"))
+    if realised:
         cashflows.append(
             _mexc_cashflow(
                 account_id=account_id,
                 source=source,
-                source_id=component_id,
+                source_id=f"position:{source_id}",
                 event_time=updated_at,
                 event_time_ms=updated_ms,
-                event_type=event_type,
+                event_type="realized_pnl",
                 event_subtype="position_summary",
                 symbol=symbol,
                 currency=settlement,
-                amount=decimal_text(amount),
+                amount=decimal_text(realised),
                 position_id=source_id,
                 collected_at=collected_at,
-                notes="Position total component, dated at source update; not settlement timing.",
+                reporting_role="supplemental",
+            )
+        )
+    funding = Decimal(decimal_text(payload.get("holdFee"), default="0"))
+    if funding:
+        cashflows.append(
+            _mexc_cashflow(
+                account_id=account_id,
+                source=source,
+                source_id=f"position-funding:{source_id}",
+                event_time=updated_at,
+                event_time_ms=updated_ms,
+                event_type="funding",
+                event_subtype="position_summary",
+                symbol=symbol,
+                currency=settlement,
+                amount=decimal_text(funding),
+                position_id=source_id,
+                collected_at=collected_at,
+                reporting_role="supplemental",
             )
         )
     return NormalizedRecord(
         source_id,
         {"positions": [row], "cashflows": cashflows},
     )
-
-
-def resolve_mexc_cashflows(store: DataStore, account_id: str) -> None:
-    """Count retained position totals once, keeping uncovered detail authoritative."""
-    cashflows = [
-        row for row in store.tables["cashflows"].read()
-        if row["venue"] == "mexc" and row["account_id"] == account_id
-    ]
-    summary_components = {
-        (row["position_id"], row["event_type"])
-        for row in cashflows
-        if row["event_subtype"] == "position_summary" and row["reporting_role"] == "primary"
-    }
-    positions = {
-        row["position_id"]: row for row in store.tables["positions"].read()
-        if row["venue"] == "mexc" and row["account_id"] == account_id
-    }
-    order_positions: dict[str, str] = {}
-    for source in ("history_orders", "open_orders"):
-        for raw in store.raw.read("mexc", source):
-            if raw["account_id"] == account_id and raw["payload"].get("positionId"):
-                order_positions[str(raw["payload"]["orderId"])] = str(
-                    raw["payload"]["positionId"]
-                )
-    funding_sides = {
-        raw["raw_id"]: {1: "long", 2: "short"}.get(
-            int(raw["payload"].get("positionType") or 0), ""
-        )
-        for raw in store.raw.read("mexc", "funding_records")
-        if raw["account_id"] == account_id
-    }
-    execution_sides = {
-        row["trade_id"]: row["position_side"]
-        for row in store.tables["executions"].read()
-        if row["venue"] == "mexc" and row["account_id"] == account_id
-    }
-    changed = []
-    for row in cashflows:
-        if row["event_subtype"] not in {"fill_profit", "fill_fee", "funding_settlement"}:
-            continue
-        timestamp = int(row["event_time_ms"] or 0)
-        position_id = row["position_id"] or order_positions.get(row["order_id"], "")
-        candidates = []
-        for position in positions.values():
-            if (position["position_id"], row["event_type"]) not in summary_components:
-                continue
-            if position["symbol"] != row["symbol"]:
-                continue
-            if position["settlement_currency"] != row["currency"]:
-                continue
-            if not (
-                int(position["opened_at_ms"] or 0) <= timestamp
-                <= int(position["source_updated_at_ms"] or 0)
-            ):
-                continue
-            if position_id:
-                matches = position["position_id"] == position_id
-            else:
-                # Responses can omit positionId; contract, side and lifetime
-                # must identify exactly one position. Never match on amount alone.
-                side = funding_sides.get(row["raw_ref"], "") or execution_sides.get(
-                    row["trade_id"], ""
-                )
-                matches = bool(side) and side == position["position_side"]
-            if matches:
-                candidates.append(position)
-        if len(candidates) > 1:
-            raise ValueError(f"Ambiguous MEXC position membership: {row['record_id']}")
-        updated = dict(row)
-        updated["reporting_role"] = "informational" if candidates else "primary"
-        if candidates:
-            updated["position_id"] = candidates[0]["position_id"]
-        if updated != row:
-            changed.append(updated)
-    store.upsert("cashflows", changed)
 
 
 def _mexc_cashflow(

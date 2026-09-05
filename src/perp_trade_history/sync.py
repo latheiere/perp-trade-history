@@ -132,7 +132,6 @@ class SyncEngine:
             LOGGER.info("Venue collection started: venue=%s", venue.name)
             for batch in adapter.collect(end_ms=end_ms, full=full):
                 result.sources.append(self.persist_batch(batch))
-            adapter.finalize_cashflows()
             venue_sources = result.sources[source_start:]
             LOGGER.info(
                 "Venue collection completed: venue=%s sources=%d failed=%d "

@@ -49,7 +49,6 @@ def pnl_report(
     *,
     period: str,
     group_by: list[str],
-    include_supplemental: bool = False,
     include_non_pnl: bool = False,
     start_ms: int | None = None,
     end_ms: int | None = None,
@@ -65,7 +64,6 @@ def pnl_report(
 
     selected = select_cashflows(
         store,
-        include_supplemental=include_supplemental,
         include_non_pnl=include_non_pnl,
         start_ms=start_ms,
         end_ms=end_ms,
@@ -183,7 +181,6 @@ def pnl_report(
 def select_cashflows(
     store: DataStore,
     *,
-    include_supplemental: bool = False,
     include_non_pnl: bool = False,
     start_ms: int | None = None,
     end_ms: int | None = None,
@@ -191,9 +188,8 @@ def select_cashflows(
     symbols: set[str] | None = None,
 ) -> list[dict[str, str]]:
     selected: list[dict[str, str]] = []
-    allowed_roles = {"primary", "supplemental"} if include_supplemental else {"primary"}
     for row in store.tables["cashflows"].iter_read():
-        if row.get("reporting_role") not in allowed_roles:
+        if row.get("reporting_role") != "primary":
             continue
         event_type = str(row.get("event_type") or "")
         if not include_non_pnl and (

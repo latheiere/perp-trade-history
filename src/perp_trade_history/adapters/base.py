@@ -87,6 +87,10 @@ class VenueAdapter(ABC):
     def collect(self, *, end_ms: int, full: bool) -> list[SourceBatch]:
         """Collect independent source batches without mutating durable storage."""
 
+    def finalize_cashflows(self) -> None:
+        """Resolve overlapping sources after all venue batches have been persisted."""
+        return None
+
     def start_for(
         self,
         source: str,

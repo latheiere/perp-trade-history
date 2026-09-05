@@ -29,7 +29,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end", help="Inclusive UTC ISO end")
     parser.add_argument("--venue", action="append", choices=["binance", "gate", "mexc"])
     parser.add_argument("--symbol", action="append")
-    parser.add_argument("--include-supplemental", action="store_true")
     parser.add_argument("--include-non-pnl", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -61,7 +60,6 @@ def main(argv: list[str] | None = None) -> None:
             store,
             period=args.period,
             group_by=["venue", "symbol", "event_type", "currency"],
-            include_supplemental=args.include_supplemental,
             include_non_pnl=args.include_non_pnl,
             start_ms=_time_ms(args.start),
             end_ms=_time_ms(args.end),
@@ -203,7 +201,8 @@ def render_text_report(
         f"Basis: primary signed cashflows converted to {target_currency} with venue spot "
         f"daily {conversion_method.replace('_', ' ')} prices; "
         "transfers/conversions excluded by default.",
-        "Realized PnL represents closed execution outcomes; coverage is never assumed.",
+        "Position totals use source update time; individual settlement timing may be unavailable.",
+        "Coverage is never assumed.",
         "",
     ]
     if table_rows:

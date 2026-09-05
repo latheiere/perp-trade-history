@@ -1007,7 +1007,7 @@ def normalize_gate_position_close(
         source_updated_at_ms=closed_ms,
         collected_at=collected_at,
     )
-    supplemental = row_for(
+    summary = row_for(
         "cashflows",
         record_id=stable_id(
             "gate", account_id, "cashflow", "position-summary", settlement, source_id
@@ -1023,7 +1023,7 @@ def normalize_gate_position_close(
         currency=settlement.upper(),
         amount=decimal_text(payload.get("pnl"), default="0"),
         position_id=source_id,
-        reporting_role="supplemental",
+        reporting_role="informational",
         source=source,
         source_id=source_id,
         source_updated_at=closed_at,
@@ -1032,7 +1032,7 @@ def normalize_gate_position_close(
     )
     return NormalizedRecord(
         source_id,
-        {"positions": [position], "cashflows": [supplemental]},
+        {"positions": [position], "cashflows": [summary]},
     )
 
 

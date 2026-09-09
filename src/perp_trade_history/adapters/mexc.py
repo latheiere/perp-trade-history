@@ -132,6 +132,17 @@ class MexcAdapter(VenueAdapter):
     def finalize_cashflows(self) -> None:
         resolve_mexc_cashflows(self.store, self.venue.account_id)
 
+    @staticmethod
+    def position_lifetime_ids(
+        store: DataStore, executions: list[dict[str, str]]
+    ) -> dict[str, str]:
+        orders = _order_position_ids(store)
+        return {
+            row["record_id"]: orders[(row["account_id"], row["order_id"])]
+            for row in executions
+            if (row["account_id"], row["order_id"]) in orders
+        }
+
     def __init__(self, *args: Any, http: ReadOnlyHttp | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.http = http or ReadOnlyHttp(
@@ -1012,6 +1023,17 @@ def normalize_mexc_position(
     )
 
 
+def _order_position_ids(store: DataStore) -> dict[tuple[str, str], str]:
+    positions = {}
+    for source in ("history_orders", "open_orders"):
+        for raw in store.raw.read("mexc", source):
+            if raw["payload"].get("positionId"):
+                positions[(raw["account_id"], str(raw["payload"]["orderId"]))] = str(
+                    raw["payload"]["positionId"]
+                )
+    return positions
+
+
 def resolve_mexc_cashflows(store: DataStore, account_id: str) -> None:
     """Count retained position totals once, keeping uncovered detail authoritative."""
     cashflows = [
@@ -1027,13 +1049,7 @@ def resolve_mexc_cashflows(store: DataStore, account_id: str) -> None:
         row["position_id"]: row for row in store.tables["positions"].read()
         if row["venue"] == "mexc" and row["account_id"] == account_id
     }
-    order_positions: dict[str, str] = {}
-    for source in ("history_orders", "open_orders"):
-        for raw in store.raw.read("mexc", source):
-            if raw["account_id"] == account_id and raw["payload"].get("positionId"):
-                order_positions[str(raw["payload"]["orderId"])] = str(
-                    raw["payload"]["positionId"]
-                )
+    order_positions = _order_position_ids(store)
     funding_sides = {
         raw["raw_id"]: {1: "long", 2: "short"}.get(
             int(raw["payload"].get("positionType") or 0), ""
@@ -1051,7 +1067,7 @@ def resolve_mexc_cashflows(store: DataStore, account_id: str) -> None:
         if row["event_subtype"] not in {"fill_profit", "fill_fee", "funding_settlement"}:
             continue
         timestamp = int(row["event_time_ms"] or 0)
-        position_id = row["position_id"] or order_positions.get(row["order_id"], "")
+        position_id = row["position_id"] or order_positions.get((account_id, row["order_id"]), "")
         candidates = []
         for position in positions.values():
             if (position["position_id"], row["event_type"]) not in summary_components:

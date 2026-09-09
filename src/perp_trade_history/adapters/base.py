@@ -91,6 +91,13 @@ class VenueAdapter(ABC):
         """Resolve overlapping sources after all venue batches have been persisted."""
         return None
 
+    @staticmethod
+    def position_lifetime_ids(
+        store: DataStore, executions: list[dict[str, str]]
+    ) -> dict[str, str]:
+        """Map execution record IDs to native position lifetimes when available."""
+        return {}
+
     def start_for(
         self,
         source: str,

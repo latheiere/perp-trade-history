@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
+from perp_trade_history.adapters import ADAPTERS
+from perp_trade_history.analytics.episodes import EpisodeBuilder
 from perp_trade_history.models import (
     canonical_settlement_currency,
     decimal_text,
@@ -34,6 +36,153 @@ PNL_REQUIRED_DATASETS = {
     "mexc": ("trades", "income"),
 }
 NON_PNL_EVENT_TYPES = frozenset({"transfer", "conversion"})
+
+
+def position_trade_counts(
+    store: DataStore,
+    *,
+    period: str,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    venues: set[str] | None = None,
+    symbols: set[str] | None = None,
+) -> dict[tuple[str, str, str], int]:
+    """Count observed position cycles, including open and boundary-truncated cycles."""
+    if period not in REPORT_PERIODS:
+        raise ValueError(f"unsupported period: {period}")
+
+    def selected(row: dict[str, str]) -> bool:
+        return (not venues or row["venue"] in venues) and (
+            not symbols or row["symbol"] in symbols
+        )
+
+    def position_time(row: dict[str, str]) -> int:
+        timestamp = int(row["source_updated_at_ms"] or row["closed_at_ms"]
+                        or row["opened_at_ms"] or 0)
+        if not timestamp and row["collected_at"]:
+            timestamp = int(parse_datetime(row["collected_at"]).timestamp() * 1000)
+        return timestamp
+
+    executions = [row for row in store.tables["executions"].iter_read() if selected(row)]
+    positions = [row for row in store.tables["positions"].iter_read() if selected(row)]
+    as_of = end_ms if end_ms is not None else max(
+        [int(row["event_time_ms"] or 0) for row in executions]
+        + [position_time(row) for row in positions],
+        default=0,
+    )
+    summary_ids = {
+        (row["venue"], row["account_id"], row["symbol"], row["position_id"])
+        for row in store.tables["cashflows"].iter_read()
+        if row["event_subtype"] == "position_summary"
+    }
+    trades: list[tuple[tuple[str, ...], int, int | None]] = []
+
+    # Complete venue summaries retain lifetimes even when individual fills expired.
+    # Zero-position snapshots without an opening and closing time are not trades.
+    summaries: dict[tuple[str, ...], list[tuple[int, int]]] = defaultdict(list)
+    snapshots: list[tuple[tuple[str, ...], int]] = []
+    seen: set[tuple[str, ...]] = set()
+    for row in positions:
+        opened = int(row["opened_at_ms"] or 0)
+        closed = int(row["closed_at_ms"] or 0)
+        context = (
+            row["venue"], row["account_id"], row["market_type"],
+            row["symbol"], row["position_side"],
+        )
+        summary_id = (row["venue"], row["account_id"], row["symbol"], row["position_id"])
+        is_open_summary = row["status"] == "open" and summary_id in summary_ids
+        if not (closed > 0 or is_open_summary):
+            if row["status"] == "open" and Decimal(row["quantity"] or "0") > 0:
+                snapshots.append((context, position_time(row)))
+            continue
+        opened = opened or closed
+        if opened <= 0 or opened > as_of or (closed and closed < opened):
+            continue
+        identity = (*context, row["position_id"] or row["record_id"])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        summaries[context].append((opened, closed or as_of))
+        trades.append((context, opened, closed if 0 < closed <= as_of else None))
+
+    # Native lifetime IDs keep partial history together even when missing fills
+    # would otherwise make execution reconstruction split a single position.
+    native_ids: dict[str, str] = {}
+    for venue, adapter in ADAPTERS.items():
+        rows = [row for row in executions if row["venue"] == venue]
+        if rows:
+            native_ids.update(adapter.position_lifetime_ids(store, rows))
+    native_opened: dict[tuple[str, ...], int] = {}
+    for row in executions:
+        native_id = native_ids.get(row["record_id"])
+        timestamp = int(row["event_time_ms"] or 0)
+        if not native_id or not 0 < timestamp <= as_of:
+            continue
+        context = (
+            row["venue"], row["account_id"], row["market_type"],
+            row["symbol"], row["position_side"],
+        )
+        identity = (*context, native_id)
+        if identity not in seen:
+            native_opened[identity] = min(native_opened.get(identity, timestamp), timestamp)
+    trades.extend((identity[:-1], opened, None) for identity, opened in native_opened.items())
+
+    # Read the opening history before filtering, so a window does not split a trade.
+    episodes = EpisodeBuilder(as_of_ms=as_of).build(
+        row for row in executions if row["record_id"] not in native_ids
+    ).episodes
+    boundary_runs: dict[tuple[str, ...], int] = {}
+    for episode in episodes:
+        closed = episode.closed_at_ms
+        context = (
+            episode.venue, episode.account_id, episode.market_type,
+            episode.symbol, episode.direction,
+        )
+        # A summary and the executions within that position describe the same trade.
+        # Adjacent lifetimes meeting at one timestamp remain separate trades.
+        covered = any(
+            (episode.opened_at_ms < end and (closed or as_of) > start)
+            or (episode.opened_at_ms == closed and start < closed <= end)
+            or (start == end and episode.opened_at_ms <= start <= (closed or as_of))
+            for start, end in summaries.get(context, ())
+        )
+        if covered:
+            boundary_runs.pop(context, None)
+            continue
+        left_censored = episode.boundary_status in {"left_censored", "both_censored"}
+        if left_censored and context in boundary_runs:
+            index = boundary_runs[context]
+            # Successive partial closes without an observed opening are one
+            # boundary-truncated position, not one trade per reduction.
+            trades[index] = (context, trades[index][1], closed)
+        else:
+            if left_censored:
+                boundary_runs[context] = len(trades)
+            else:
+                boundary_runs.pop(context, None)
+            trades.append((context, episode.opened_at_ms, closed))
+
+    # A nonzero snapshot is evidence of a trade even if both execution boundaries
+    # are missing. Repeated snapshots within a known cycle do not add trades.
+    for context, observed in sorted(snapshots, key=lambda item: item[1]):
+        if 0 < observed <= as_of and not any(
+            context == trade_context and opened <= observed <= (closed or as_of)
+            for trade_context, opened, closed in trades
+        ):
+            trades.append((context, observed, None))
+
+    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    for context, opened, closed in trades:
+        if start_ms is not None and closed is not None and closed < start_ms:
+            continue
+        # Closed cycles belong to their close period. Ongoing cycles belong to
+        # their first observed activity, clipped to the requested window start.
+        counted_at = closed if closed is not None else max(opened, start_ms or 0)
+        if counted_at > as_of:
+            continue
+        bucket = "all" if period == "none" else _period_start_ms(counted_at, period)
+        counts[(bucket, context[0], context[3])] += 1
+    return dict(counts)
 
 
 class ReportConversion(Protocol):

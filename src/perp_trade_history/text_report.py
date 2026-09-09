@@ -9,7 +9,7 @@ from typing import Any
 from perp_trade_history.config import load_config
 from perp_trade_history.conversion import ConversionError, StoredCashflowConversion
 from perp_trade_history.models import compact_base_symbol, parse_datetime
-from perp_trade_history.reporting import REPORT_PERIODS, pnl_report
+from perp_trade_history.reporting import REPORT_PERIODS, pnl_report, position_trade_counts
 from perp_trade_history.storage import DataStore
 
 COMPONENTS = ("realized_pnl", "funding", "commission", "rebate", "reward", "settlement")
@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--venue", action="append", choices=["binance", "gate", "mexc"])
     parser.add_argument("--symbol", action="append")
     parser.add_argument("--include-non-pnl", action="store_true")
+    parser.add_argument(
+        "--extra-columns",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show REWARD through OTHER columns; hiding them does not change TOTAL",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--compact",
@@ -82,6 +88,15 @@ def main(argv: list[str] | None = None) -> None:
             compact=args.compact,
             target_currency=config.reporting.target_currency,
             conversion_method=config.reporting.conversion_method,
+            trade_counts=position_trade_counts(
+                store,
+                period=args.period,
+                start_ms=_time_ms(args.start),
+                end_ms=_time_ms(args.end),
+                venues=selected_venues,
+                symbols=set(args.symbol) if args.symbol else None,
+            ),
+            extra_columns=args.extra_columns,
         )
     )
 
@@ -94,6 +109,8 @@ def render_text_report(
     compact: bool = True,
     target_currency: str = "USDT",
     conversion_method: str = "previous_day.close",
+    trade_counts: dict[tuple[str, str, str], int] | None = None,
+    extra_columns: bool = True,
 ) -> str:
     grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in rows:
@@ -112,6 +129,7 @@ def render_text_report(
             {
                 "amounts": defaultdict(Decimal),
                 "events": 0,
+                "trades": 0,
                 "coverage": "complete",
                 "other_event_breakdown": [],
             },
@@ -140,6 +158,18 @@ def render_text_report(
         if STATUS_RANK.get(status, 1) > STATUS_RANK.get(target["coverage"], 1):
             target["coverage"] = status
 
+    for (bucket, venue, symbol), count in (trade_counts or {}).items():
+        display_symbol = compact_base_symbol(symbol) if compact else symbol
+        key = (bucket, venue, display_symbol or "(account)", target_currency)
+        target = grouped.setdefault(
+            key,
+            {
+                "amounts": defaultdict(Decimal), "events": 0, "trades": 0,
+                "coverage": "unknown", "other_event_breakdown": [],
+            },
+        )
+        target["trades"] += count
+
     headers = [
         "PERIOD",
         "VENUE",
@@ -147,17 +177,10 @@ def render_text_report(
         "REALIZED",
         "FUNDING",
         "COMMISSION",
-        "REWARD",
-        "SETTLEMENT",
-        "REBATE",
-        "BONUS",
-        "PREMIUM",
-        "INSURANCE",
-        "OTHER",
-        "TOTAL",
-        "EVENTS",
-        "COVERAGE",
     ]
+    if extra_columns:
+        headers.extend(["REWARD", "SETTLEMENT", "REBATE", "BONUS", "PREMIUM", "INSURANCE", "OTHER"])
+    headers.extend(["TOTAL", "TRADES", "EVENTS", "COVERAGE"])
     if not compact:
         headers.insert(3, "CURRENCY")
     table_rows: list[list[str]] = []
@@ -180,17 +203,14 @@ def render_text_report(
             _number(amounts["realized_pnl"]),
             _number(amounts["funding"]),
             _number(amounts["commission"]),
-            _number(amounts["reward"]),
-            _number(amounts["settlement"]),
-            _number(amounts["rebate"]),
-            _number(amounts["bonus"]),
-            _number(amounts["premium"]),
-            _number(amounts["insurance"]),
-            _number(amounts["other"]),
-            _number(total),
-            str(value["events"]),
-            str(value["coverage"]),
         ]
+        if extra_columns:
+            table_row.extend(_number(amounts[name]) for name in (
+                "reward", "settlement", "rebate", "bonus", "premium", "insurance", "other"
+            ))
+        table_row.extend([
+            _number(total), str(value["trades"]), str(value["events"]), str(value["coverage"])
+        ])
         if not compact:
             table_row.insert(3, currency)
         table_rows.append(table_row)
@@ -202,6 +222,8 @@ def render_text_report(
         f"daily {conversion_method.replace('_', ' ')} prices; "
         "transfers/conversions excluded by default.",
         "Position totals use source update time; individual settlement timing may be unavailable.",
+        "TRADES counts position cycles, including open and boundary-truncated positions; "
+        "adds and partial reductions stay within one trade.",
         "Coverage is never assumed.",
         "",
     ]

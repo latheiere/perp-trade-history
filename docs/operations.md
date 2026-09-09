@@ -48,6 +48,25 @@ while collection runs; changed source files are detected automatically.
 See [using the dashboard](dashboard.md) for filters, drill-downs, metrics, and data
 quality.
 
+## Print the PnL report
+
+Read retained history without collecting new data:
+
+```bash
+.venv/bin/perp-trade-history-pnl --config config/config.toml
+```
+
+`TRADES`, between `TOTAL` and `EVENTS`, counts observed position cycles. Adding to
+a position or partially reducing it stays within one trade until the position is
+fully closed. Open positions and positions with missing history boundaries also
+count once. Counts depend on the retained evidence; they do not certify complete
+history. With period grouping, closed trades belong to their closing period, and
+open trades belong to their first observed activity, clipped to `--start` when set.
+
+All amount columns are shown by default. Add `--no-extra-columns` to hide `REWARD`
+through `OTHER`, or `--extra-columns` to show them. Hidden amounts remain included
+in `TOTAL`.
+
 ## Check collection status
 
 Show record counts and source coverage:

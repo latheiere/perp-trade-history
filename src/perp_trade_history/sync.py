@@ -5,22 +5,14 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from perp_trade_history.adapters.base import SourceBatch, VenueAdapter
-from perp_trade_history.adapters.binance import BinanceAdapter
-from perp_trade_history.adapters.gate import GateAdapter
-from perp_trade_history.adapters.mexc import MexcAdapter
+from perp_trade_history.adapters import ADAPTERS
+from perp_trade_history.adapters.base import SourceBatch
 from perp_trade_history.config import AppConfig
 from perp_trade_history.conversion import CashflowConversionPass
 from perp_trade_history.models import row_for, stable_id, timestamp_fields, utc_now_iso
 from perp_trade_history.storage import DataStore
 
 LOGGER = logging.getLogger(__name__)
-
-ADAPTERS: dict[str, type[VenueAdapter]] = {
-    "binance": BinanceAdapter,
-    "gate": GateAdapter,
-    "mexc": MexcAdapter,
-}
 
 
 def run_conversion_pass(

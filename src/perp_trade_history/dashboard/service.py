@@ -42,7 +42,7 @@ class SnapshotService:
 
     def __init__(
         self, provider: SnapshotProvider, *, max_entries: int = 32,
-        max_bytes: int = 8 * 1024 * 1024, ttl_seconds: float = 300,
+        max_bytes: int = 64 * 1024 * 1024, ttl_seconds: float = 300,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         if (
@@ -55,6 +55,7 @@ class SnapshotService:
         self._max_bytes = max_bytes
         self._ttl = ttl_seconds
         self._clock = clock
+        self._last_access = clock()
         self._stop = Event()
         self._sweeper: Thread | None = None
         self._provider = provider
@@ -97,6 +98,10 @@ class SnapshotService:
             if self._stop.is_set():
                 raise RuntimeError("snapshot service is closed")
             self._expire()
+            self._last_access = self._clock()
+            if self._sweeper is None:
+                self._sweeper = Thread(target=self._sweep, name="report-cache-expiry", daemon=True)
+                self._sweeper.start()
             entry = self._cache.get(filters)
             if entry:
                 self._cache.move_to_end(filters)
@@ -109,6 +114,7 @@ class SnapshotService:
                 self._status = "error"
                 self._message = _safe_message(exc)
                 self._sequence += 1
+                self._last_access = self._clock()
                 return (entry.last_good if entry else None) or empty_snapshot(
                     revision=self._revision,
                     message=(
@@ -120,6 +126,7 @@ class SnapshotService:
                 snapshot if snapshot.status == "ready" else entry.last_good if entry else None
             )
             self._retain(filters, snapshot, last_good)
+            self._last_access = self._clock()
             self._status = snapshot.status
             self._message = snapshot.message
             return snapshot
@@ -142,9 +149,6 @@ class SnapshotService:
             self._revision, snapshot, last_good, self._clock() + self._ttl, size,
         )
         self._cache_bytes += size
-        if self._sweeper is None:
-            self._sweeper = Thread(target=self._sweep, name="report-cache-expiry", daemon=True)
-            self._sweeper.start()
 
     def _expire(self) -> None:
         now = self._clock()
@@ -156,7 +160,10 @@ class SnapshotService:
         while not self._stop.wait(min(self._ttl / 2, 60)):
             with self._lock:
                 self._expire()
-                if not self._cache and isinstance(self._provider, AnalyticsSnapshotProvider):
+                if (
+                    self._clock() - self._last_access >= self._ttl
+                    and isinstance(self._provider, AnalyticsSnapshotProvider)
+                ):
                     self._provider.clear_cache()
 
     def close(self) -> None:

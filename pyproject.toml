@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perp-trade-history"
-version = "0.1.1"
+version = "0.1.2"
 description = "Private, read-only perpetual trading history and analytics dashboard"
 readme = "README.md"
 license = "Apache-2.0"

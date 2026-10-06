@@ -83,7 +83,7 @@ def test_cache_bounds_current_and_last_good_reports_with_lru_eviction() -> None:
     assert service.get(first) is first_snapshot
     assert service.get(second).status == "empty"
     assert len(service._cache) == 2
-    assert service._cache_bytes <= 8 * 1024 * 1024
+    assert service._cache_bytes <= service._max_bytes
 
     provider.fail_load = False
     tiny = SnapshotService(provider, max_bytes=256)
@@ -92,7 +92,7 @@ def test_cache_bounds_current_and_last_good_reports_with_lru_eviction() -> None:
     tiny.get(first)
     assert len(tiny._cache) == 0
     assert tiny._cache_bytes == 0
-    assert tiny._sweeper is None
+    assert tiny._sweeper is not None
 
 
 def test_cache_releases_idle_reports_without_requests_and_stops_on_close() -> None:

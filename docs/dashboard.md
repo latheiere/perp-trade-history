@@ -164,6 +164,9 @@ make history
 
 An open dashboard detects changed data files and refreshes automatically. Your
 filters remain interactive while unchanged analytical data is reused in memory.
+An unchanged collection batch does not trigger a refresh. If a refresh fails,
+recent complete views remain usable temporarily; an unavailable banner appears
+when no recent view is available.
 
 For older history outside ordinary API retention, follow the
 [historical archive guide](binance-archive-backfill.md).

@@ -369,8 +369,18 @@ class StoredCashflowConversion:
         self.spec = conversion_spec(target_currency, method, fixed_rates or {})
         self._amounts: dict[str, Decimal] = {}
 
-    def prepare(self, rows: Iterable[dict[str, str]]) -> None:
-        conversions = _load_conversions(self.store)
+    def prepare(
+        self,
+        rows: Iterable[dict[str, str]],
+        *,
+        conversion_rows: Iterable[dict[str, str]] | None = None,
+    ) -> None:
+        conversions = (
+            _load_conversions(self.store)
+            if conversion_rows is None
+            else {row["cashflow_record_id"]: row for row in conversion_rows}
+        )
+        self.clear()
         missing = False
         stale = False
         for row in rows:
@@ -393,6 +403,9 @@ class StoredCashflowConversion:
                 "cashflows are missing stored converted values; run collection or "
                 "recalculate-conversions"
             )
+
+    def clear(self) -> None:
+        self._amounts.clear()
 
     def amount(self, row: dict[str, str]) -> Decimal:
         return self._amounts[row["record_id"]]

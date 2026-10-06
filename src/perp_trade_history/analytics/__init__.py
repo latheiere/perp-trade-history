@@ -13,7 +13,11 @@ from perp_trade_history.analytics.schema import (
     NotableChange,
     QualityFlag,
 )
-from perp_trade_history.analytics.service import CashflowConversion, build_snapshot
+from perp_trade_history.analytics.service import (
+    CashflowConversion,
+    build_snapshot,
+    build_snapshot_from_tables,
+)
 
 __all__ = [
     "AccountCashflowSummary",
@@ -31,4 +35,5 @@ __all__ = [
     "NotableChange",
     "QualityFlag",
     "build_snapshot",
+    "build_snapshot_from_tables",
 ]

@@ -59,7 +59,10 @@ def main(argv: list[str] | None = None) -> None:
     app = create_app(provider)
     if not args.no_browser:
         _open_browser_later(_browser_url(args.host, args.port))
-    serve(app.server, host=args.host, port=args.port, threads=8)
+    try:
+        serve(app.server, host=args.host, port=args.port, threads=8)
+    finally:
+        app.snapshot_service.close()
 
 
 def _port(value: str) -> int:

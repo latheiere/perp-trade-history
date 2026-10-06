@@ -15,7 +15,6 @@ class DashboardFilters:
     start_date: str = ""
     end_date: str = ""
     timezone: str = "UTC"
-    performance_view: str = "cumulative"
     weekday: int | None = None
     hour_bucket: int | None = None
     direction: str = "all"
@@ -46,14 +45,6 @@ class PerformancePoint:
     period: float
     rolling: float
     drawdown: float
-
-
-@dataclass(frozen=True, slots=True)
-class Regime:
-    label: str
-    start: str
-    end: str
-    tone: Tone = "neutral"
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +193,6 @@ class DashboardSnapshot:
     date_end: str = ""
     kpis: tuple[Kpi, ...] = ()
     performance: tuple[PerformancePoint, ...] = ()
-    regimes: tuple[Regime, ...] = ()
     notable_changes: tuple[NotableChange, ...] = ()
     heatmap: HeatmapData = field(
         default_factory=lambda: HeatmapData(hours=(), weekdays=(), values=())

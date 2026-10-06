@@ -382,9 +382,10 @@ def test_analytics_and_details_share_one_read_of_canonical_inputs(tmp_path, monk
 
     from perp_trade_history.dashboard.service import SnapshotService
 
-    service = SnapshotService(provider, ttl_seconds=0.05)
+    service = SnapshotService(provider, max_bytes=256, ttl_seconds=0.05)
     service.poll()
     service.get(DashboardFilters())
+    assert not service._cache
     deadline = time.monotonic() + 1
     while provider._cached_analytics is not None and time.monotonic() < deadline:
         time.sleep(0.005)

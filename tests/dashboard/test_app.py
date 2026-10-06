@@ -47,7 +47,7 @@ def _text(component: object) -> str:
     return _text(children) if children is not None else ""
 
 
-def test_app_factory_builds_all_adaptive_sections_and_ready_endpoint() -> None:
+def test_app_factory_builds_all_adaptive_sections_and_ready_endpoint(monkeypatch) -> None:
     app = create_app(refresh_interval_ms=1_000)
     ids = _component_ids(app.layout)
 
@@ -80,6 +80,24 @@ def test_app_factory_builds_all_adaptive_sections_and_ready_endpoint() -> None:
     assert ("heatmap-graph", "clickData") in callback_inputs
     assert ("date-range-filter", "start_date") in callback_inputs
     assert ("performance-view-filter", "value") in callback_inputs
+
+    render = next(
+        callback["callback"].__wrapped__
+        for callback in app.callback_map.values()
+        if "callback" in callback
+        and callback["callback"].__wrapped__.__name__ == "render_snapshot"
+    )
+    monkeypatch.setattr(
+        app.snapshot_service._provider, "load",
+        lambda _: pytest.fail("Changing chart presentation must reuse the loaded report"),
+    )
+    for view in ("cumulative", "period", "rolling", "drawdown"):
+        rendered = render(
+            None, "all", "all", "month", "all", "", "", "UTC", view,
+            {}, "All directions", "all", "All outcomes", "",
+        )
+        assert rendered[1].layout.uirevision == f"performance-{view}"
+        assert rendered[7]
 
 
 def test_app_factory_rejects_excessive_refresh_frequency() -> None:

@@ -102,29 +102,6 @@ def performance_figure(snapshot: DashboardSnapshot, view: str = "cumulative") ->
                 hovertemplate=f"%{{x|%b %Y}}<br>{label} %{{y:,.2f}}<extra></extra>",
             )
         )
-    for regime in snapshot.regimes:
-        figure.add_vrect(
-            x0=regime.start,
-            x1=regime.end,
-            fillcolor="rgba(255,255,255,0.012)",
-            line_width=1,
-            line_dash="dot",
-            line_color="rgba(129,148,163,0.28)",
-            layer="below",
-        )
-        figure.add_annotation(
-            x=regime.start,
-            y=1.05,
-            xref="x",
-            yref="paper",
-            text=regime.label,
-            showarrow=False,
-            xanchor="left",
-            font={
-                "size": 10,
-                "color": COLORS[regime.tone] if regime.tone in COLORS else COLORS["muted"],
-            },
-        )
     _style_figure(figure, height=330, margins={"l": 54, "r": 54, "t": 52, "b": 38})
     figure.update_layout(
         hovermode="x unified",

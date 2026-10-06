@@ -297,34 +297,6 @@ class GateAdapter(VenueAdapter):
                 )
         return batches
 
-    def _attempt(
-        self,
-        source: str,
-        start_ms: int,
-        end_ms: int,
-        backfill_complete: bool,
-        operation: Callable[[], SourceBatch],
-    ) -> SourceBatch:
-        skipped = self.circuit_skip_batch(
-            source=source, start_ms=start_ms, end_ms=end_ms
-        )
-        if skipped:
-            self._apply_coverage(skipped)
-            return skipped
-        try:
-            batch = operation()
-            batch.requested_start_ms = start_ms
-            batch.covered_through_ms = end_ms
-            batch.backfill_complete = backfill_complete
-            self._apply_coverage(batch)
-            return batch
-        except Exception as exc:
-            batch = self.failure_batch(
-                source=source, start_ms=start_ms, end_ms=end_ms, error=exc
-            )
-            self._apply_coverage(batch)
-            return batch
-
     @staticmethod
     def _apply_coverage(batch: SourceBatch) -> None:
         settlement, separator, short_name = batch.source.partition("_")
@@ -381,7 +353,7 @@ class GateAdapter(VenueAdapter):
             _dedupe_gate_rows(all_rows),
             collected_at,
             normalizer,
-            settlement,
+            settlement=settlement,
         )
 
     def _collect_windowed(
@@ -422,7 +394,7 @@ class GateAdapter(VenueAdapter):
             _dedupe_gate_rows(rows),
             collected_at,
             normalizer,
-            settlement,
+            settlement=settlement,
         )
 
     def _collect_list(
@@ -443,7 +415,7 @@ class GateAdapter(VenueAdapter):
             [row for row in payload if isinstance(row, dict)],
             collected_at,
             normalizer,
-            settlement,
+            settlement=settlement,
         )
 
     def _collect_account_snapshot(
@@ -542,7 +514,7 @@ class GateAdapter(VenueAdapter):
             _dedupe_gate_rows(rows),
             collected_at,
             normalizer,
-            settlement,
+            settlement=settlement,
         )
 
     def _collect_offset_pages(
@@ -604,41 +576,8 @@ class GateAdapter(VenueAdapter):
             _dedupe_gate_rows(combined),
             collected_at,
             normalize_gate_position,
-            settlement,
+            settlement=settlement,
         )
-
-    def _normalize_rows(
-        self,
-        source: str,
-        rows: Iterable[dict[str, Any]],
-        collected_at: str,
-        normalizer: Callable[..., NormalizedRecord],
-        settlement: str,
-    ) -> SourceBatch:
-        batch = SourceBatch(self.name, source, 0, 0, False)
-        for payload in rows:
-            normalized = normalizer(
-                payload,
-                account_id=self.venue.account_id,
-                source=source,
-                collected_at=collected_at,
-                settlement=settlement,
-            )
-            source_id = normalized.source_id
-            raw = raw_record(
-                venue=self.name,
-                account_id=self.venue.account_id,
-                source=source,
-                source_id=source_id,
-                payload=payload,
-                collected_at=collected_at,
-            )
-            batch.raw_records.append(raw)
-            for table, table_rows in normalized.table_rows.items():
-                for row in table_rows:
-                    row["raw_ref"] = raw["raw_id"]
-                    batch.add_row(table, row)
-        return batch
 
     def _get(self, path: str, params: list[tuple[str, Any]]) -> Any:
         timestamp_seconds = int(time.time())

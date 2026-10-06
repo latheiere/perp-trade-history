@@ -117,27 +117,23 @@ def _analytics_snapshot(*, with_cashflow: bool = False) -> SimpleNamespace:
     )
 
 
-def test_synthetic_provider_is_deterministic_and_filterable() -> None:
+def test_demonstration_records_use_canonical_analytics_and_filters(tmp_path) -> None:
+    from perp_trade_history.dashboard.demo import demonstration_tables
+
     provider = SyntheticSnapshotProvider()
     first = provider.load(DashboardFilters())
-    second = provider.load(
-        DashboardFilters(
-            market_class="perpetual derivatives",
-            direction="long",
-            query="ambiguous",
-        )
-    )
+    selected = provider.load(DashboardFilters(direction="long", outcome="open"))
+    store = DataStore(tmp_path)
+    for name, rows in demonstration_tables().items():
+        store.upsert(name, rows)
+    canonical = AnalyticsSnapshotProvider(store, reporting_currency="USDT").load(DashboardFilters())
 
     assert first == provider.load(DashboardFilters())
-    assert second.episodes
-    assert all(
-        item.direction == "Long" and "Ambiguous Tie Order" in item.tags for item in second.episodes
-    )
-    assert any(item.confidence == "Low confidence" for item in first.notable_changes)
-    assert len(first.episodes) == 240
-    assert first.performance[-1].net == 20_514.0
-    assert any(item.period < 0 for item in first.performance)
-    assert any(item.net_result is not None and item.net_result < 0 for item in first.years)
+    assert replace(first, revision=canonical.revision, build=canonical.build) == canonical
+    assert selected.episodes
+    assert all(item.direction == "Long" and item.status == "Open" for item in selected.episodes)
+    assert all(item.executions and item.cashflows for item in first.episodes)
+    assert first.coverage_gaps
 
 
 def test_analytics_provider_uses_file_identity_and_only_exposes_trade_supported_metrics(
@@ -146,17 +142,17 @@ def test_analytics_provider_uses_file_identity_and_only_exposes_trade_supported_
     store = DataStore(tmp_path)
     provider = AnalyticsSnapshotProvider(store, reporting_currency="Reporting currency")
     monkeypatch.setattr(
-        "perp_trade_history.dashboard.providers.build_snapshot",
+        "perp_trade_history.dashboard.providers.build_snapshot_from_tables",
         lambda store, conversion=None: _analytics_snapshot(),
     )
     first_revision = provider.revision()
     source = store.tables["executions"].path
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text("generic-source-revision", encoding="utf-8")
+    source.write_text(",".join(store.tables["executions"].fieldnames) + "\n", encoding="utf-8")
     first_file_revision = provider.revision()
     stat = source.stat()
     replacement = source.with_suffix(".replacement")
-    replacement.write_text("generic-source-revision", encoding="utf-8")
+    replacement.write_text(source.read_text(), encoding="utf-8")
     os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     os.replace(replacement, source)
     replacement_revision = provider.revision()
@@ -180,7 +176,7 @@ def test_analytics_provider_derives_safe_cashflow_patterns(tmp_path, monkeypatch
     store = DataStore(tmp_path)
     provider = AnalyticsSnapshotProvider(store, reporting_currency="Reporting currency")
     monkeypatch.setattr(
-        "perp_trade_history.dashboard.providers.build_snapshot",
+        "perp_trade_history.dashboard.providers.build_snapshot_from_tables",
         lambda store, conversion=None: _analytics_snapshot(with_cashflow=True),
     )
 
@@ -207,7 +203,7 @@ def test_analytics_provider_reuses_canonical_snapshot_across_filters(tmp_path, m
         return _analytics_snapshot(with_cashflow=True)
 
     monkeypatch.setattr(
-        "perp_trade_history.dashboard.providers.build_snapshot",
+        "perp_trade_history.dashboard.providers.build_snapshot_from_tables",
         counted_snapshot,
     )
 
@@ -218,7 +214,7 @@ def test_analytics_provider_reuses_canonical_snapshot_across_filters(tmp_path, m
 
     source = store.tables["executions"].path
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text("new canonical revision", encoding="utf-8")
+    source.write_text(",".join(store.tables["executions"].fieldnames) + "\n", encoding="utf-8")
     provider.load(DashboardFilters(direction="short"))
 
     assert builds == 2
@@ -330,3 +326,68 @@ def test_filtered_performance_horizon_starts_at_zero_and_excludes_prior_periods(
     ]
     assert [point.net for point in sparse] == [0.0, -3.0]
     assert [point.rolling for point in sparse] == [0.0, -3.0]
+
+
+def test_analytics_and_details_share_one_read_of_canonical_inputs(tmp_path, monkeypatch) -> None:
+    from perp_trade_history.conversion import CashflowConversionPass, StoredCashflowConversion
+    from tests.analytics.synthetic_history import SyntheticHistory, utc_ms
+
+    history = SyntheticHistory()
+    opened = utc_ms(2023, 1, 2)
+    history.add_execution("open", time_ms=opened, action="open_long", quantity="1", price="10")
+    history.add_execution(
+        "close", time_ms=opened + 3_600_000, action="close_long", quantity="1", price="15"
+    )
+    history.add_cashflow(
+        "result", time_ms=opened + 3_600_000, event_type="realized_pnl", amount="5",
+        trade_id="trade-close",
+    )
+    store = history.write(tmp_path)
+    settings = SimpleNamespace(reporting=SimpleNamespace(
+        target_currency="CURRENCY_A", conversion_method="previous_day.close", fixed_rates={},
+    ))
+    CashflowConversionPass(store, settings, adapters={"venue_a": object()}).run()
+    reads = {name: 0 for name in store.tables}
+    for name, table in store.tables.items():
+        original = table.read
+
+        def counted(name=name, original=original):
+            reads[name] += 1
+            rows = original()
+            if reads[name] > 1 and name == "executions":
+                rows = [{**row, "price": "9999"} for row in rows]
+            return rows
+
+        monkeypatch.setattr(table, "read", counted)
+    monkeypatch.setattr(
+        "perp_trade_history.conversion._load_conversions",
+        lambda store: (_ for _ in ()).throw(AssertionError("duplicate conversion read")),
+    )
+    provider = AnalyticsSnapshotProvider(
+        store, reporting_currency="CURRENCY_A",
+        conversion=StoredCashflowConversion(
+            store, target_currency="CURRENCY_A", method="previous_day.close",
+        ),
+    )
+    snapshot = provider.load(DashboardFilters())
+    provider.load(DashboardFilters(direction="long"))
+    assert all(count == 1 for count in reads.values())
+    episode = snapshot.episodes[0]
+    opening = next(item for item in episode.executions if item.transition == "Open")
+    assert Decimal(episode.entry) == Decimal(opening.price) == 10
+    assert episode.net_result == 5
+    assert Decimal(episode.cashflows[0].reporting_amount) == 5
+
+    import time
+
+    from perp_trade_history.dashboard.service import SnapshotService
+
+    service = SnapshotService(provider, ttl_seconds=0.05)
+    service.poll()
+    service.get(DashboardFilters())
+    deadline = time.monotonic() + 1
+    while provider._cached_analytics is not None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert provider._cached_analytics is None
+    assert provider._cached_execution_rows == provider._cached_cashflow_rows == []
+    assert provider._conversion._amounts == {}

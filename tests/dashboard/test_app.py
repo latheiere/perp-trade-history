@@ -175,7 +175,10 @@ def test_cli_supports_runtime_arguments_and_wildcard_browser_target(monkeypatch)
     served: dict[str, object] = {}
     monkeypatch.setattr(
         "perp_trade_history.dashboard.cli.create_app",
-        lambda provider: SimpleNamespace(server="server"),
+        lambda provider: SimpleNamespace(
+            server="server",
+            snapshot_service=SimpleNamespace(close=lambda: served.update(closed=True))
+        ),
     )
     monkeypatch.setattr(
         "perp_trade_history.dashboard.cli.serve",
@@ -188,4 +191,6 @@ def test_cli_supports_runtime_arguments_and_wildcard_browser_target(monkeypatch)
 
     main(["--synthetic", "--host", "0.0.0.0", "--port", "8090", "--no-browser"])
 
-    assert served == {"server": "server", "host": "0.0.0.0", "port": 8090, "threads": 8}
+    assert served == {
+        "server": "server", "host": "0.0.0.0", "port": 8090, "threads": 8, "closed": True
+    }

@@ -107,9 +107,9 @@ class CsvTable:
                 else:
                     by_id[record_id] = incoming
                     stats.updated += 1
-            merged = sorted(by_id.values(), key=self._sort_key)
-            self._write(merged)
-            stats.total = len(merged)
+            if stats.inserted or stats.updated:
+                self._write(sorted(by_id.values(), key=self._sort_key))
+            stats.total = len(by_id)
         return stats
     def _validate_row(self, row: dict[str, str]) -> None:
         if set(row) != set(self.fieldnames):

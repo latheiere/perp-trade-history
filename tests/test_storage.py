@@ -52,6 +52,18 @@ def test_csv_upsert_extends_history_and_overwrites_updated_source_rows(tmp_path:
     assert by_id["one"]["amount"] == "1.5"
     assert "two" in by_id
 
+    table = store.tables["cashflows"]
+    before = table.path.stat()
+    contents = table.path.read_bytes()
+    unchanged = store.upsert("cashflows", [
+        _cashflow("one", "1.5", "2026-01-04T00:00:00.000Z"),
+        _cashflow("two", "2", "2026-01-04T00:00:00.000Z"),
+    ])
+    after = table.path.stat()
+    assert unchanged.to_dict() == {"inserted": 0, "updated": 0, "unchanged": 2, "total": 2}
+    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
+    assert table.path.read_bytes() == contents
+
 
 def test_cashflow_conversion_sidecar_does_not_redefine_cashflow_rows(
     tmp_path: Path,

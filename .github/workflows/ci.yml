@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install locked runtime and development tools
+        run: |
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install -e '.[dev]' build
+      - name: Verify retained history and dashboard behavior
+        run: python -m pytest
+      - name: Check source
+        run: ruff check .
+      - name: Build distributable artifacts
+        run: python -m build

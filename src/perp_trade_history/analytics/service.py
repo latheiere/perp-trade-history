@@ -22,6 +22,7 @@ from perp_trade_history.analytics.schema import (
     FilterDimensions,
     QualityFlag,
 )
+from perp_trade_history.conversion import StoredCashflowConversion
 from perp_trade_history.storage import DataStore
 
 
@@ -40,14 +41,29 @@ def build_snapshot(
     conversion: CashflowConversion | None = None,
 ) -> AnalyticsSnapshot:
     """Build a deterministic analytics snapshot without changing canonical storage."""
-    loaded = {name: table.read() for name, table in store.tables.items()}
+    return build_snapshot_from_tables(
+        {name: table.read() for name, table in store.tables.items()},
+        as_of_ms=as_of_ms,
+        conversion=conversion,
+    )
+
+
+def build_snapshot_from_tables(
+    loaded: dict[str, list[dict[str, str]]],
+    *,
+    as_of_ms: int | None = None,
+    conversion: CashflowConversion | None = None,
+) -> AnalyticsSnapshot:
+    """Reconstruct reports from one captured set of canonical table inputs."""
     effective_as_of_ms = as_of_ms if as_of_ms is not None else _latest_fact_time(loaded)
     tables = {
         name: _rows_as_of(name, rows, effective_as_of_ms)
         for name, rows in loaded.items()
     }
     cashflows = tables["cashflows"]
-    if conversion:
+    if isinstance(conversion, StoredCashflowConversion):
+        conversion.prepare(cashflows, conversion_rows=tables["cashflow_conversions"])
+    elif conversion:
         conversion.prepare(cashflows)
     converted = {
         row["record_id"]: (

@@ -336,34 +336,6 @@ class MexcAdapter(VenueAdapter):
         batches.append(deals)
         return batches
 
-    def _attempt(
-        self,
-        source: str,
-        start_ms: int,
-        end_ms: int,
-        backfill_complete: bool,
-        operation: Callable[[], SourceBatch],
-    ) -> SourceBatch:
-        skipped = self.circuit_skip_batch(
-            source=source, start_ms=start_ms, end_ms=end_ms
-        )
-        if skipped:
-            self._apply_coverage(skipped)
-            return skipped
-        try:
-            batch = operation()
-            batch.requested_start_ms = start_ms
-            batch.covered_through_ms = end_ms
-            batch.backfill_complete = backfill_complete
-            self._apply_coverage(batch)
-            return batch
-        except Exception as exc:  # independent sources must not suppress one another
-            batch = self.failure_batch(
-                source=source, start_ms=start_ms, end_ms=end_ms, error=exc
-            )
-            self._apply_coverage(batch)
-            return batch
-
     @staticmethod
     def _apply_coverage(batch: SourceBatch) -> None:
         metadata = MEXC_COVERAGE.get(batch.source)
@@ -495,37 +467,6 @@ class MexcAdapter(VenueAdapter):
         return self._normalize_rows(
             "order_deals", _dedupe_rows(all_rows), collected_at, normalize_mexc_deal
         )
-
-    def _normalize_rows(
-        self,
-        source: str,
-        rows: Iterable[dict[str, Any]],
-        collected_at: str,
-        normalizer: Callable[..., NormalizedRecord],
-    ) -> SourceBatch:
-        batch = SourceBatch(self.name, source, 0, 0, False)
-        for payload in rows:
-            normalized = normalizer(
-                payload,
-                account_id=self.venue.account_id,
-                source=source,
-                collected_at=collected_at,
-            )
-            source_id = normalized.source_id
-            raw = raw_record(
-                venue=self.name,
-                account_id=self.venue.account_id,
-                source=source,
-                source_id=source_id,
-                payload=payload,
-                collected_at=collected_at,
-            )
-            batch.raw_records.append(raw)
-            for table, table_rows in normalized.table_rows.items():
-                for row in table_rows:
-                    row["raw_ref"] = raw["raw_id"]
-                    batch.add_row(table, row)
-        return batch
 
     def _paged(
         self, path: str, base_params: dict[str, Any], source: str

@@ -52,6 +52,13 @@ The first row summarizes the current selection:
 - **Win rate** is the share of closed episodes with positive attributed cashflow.
 - **Median duration** is the median observed holding time of closed episodes.
 
+**Attributed cashflow** sums the available net results of closed episodes matching
+the active filters, in the reporting currency. It includes retained trading P&L,
+fees, funding, and other supported trading cashflows assigned to those trades.
+Cashflows from open episodes or without a defensible episode association do not
+contribute. Adding retained historical positions can therefore change this total
+even when no new source records were collected.
+
 The performance chart offers four views:
 
 | View | What it shows |
@@ -114,6 +121,17 @@ You can:
 
 An episode is a reconstructed period of continuous exposure. It can contain many
 executions and several attributed cashflows.
+
+**Size** is an artificial entry value in the reporting currency, calculated as net
+result divided by the direction-adjusted price change relative to entry:
+
+- Long: `net result / (exit / entry - 1)`.
+- Short: `net result / (1 - exit / entry)`.
+
+Net result already includes applicable fees and funding, so Size can differ from
+actual position exposure. The calculation preserves its sign, including when costs
+make the net result oppose the price move. Open episodes, missing inputs, and a
+zero price change show **N/A**.
 
 The ledger also includes retained historical positions when individual executions
 are unavailable. Matching position records and executions appear as one trade.

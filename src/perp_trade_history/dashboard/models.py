@@ -144,6 +144,7 @@ class Episode:
     quality: tuple[QualityIndicator, ...]
     confidence: str
     samples: int
+    size: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

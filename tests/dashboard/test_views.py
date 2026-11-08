@@ -211,3 +211,13 @@ def _components(component: object, component_type: type) -> list[object]:
         if child is not None:
             matches.extend(_components(child, component_type))
     return matches
+
+
+def test_episode_size_is_numeric_in_the_ledger_and_formatted_in_the_overview() -> None:
+    original = SyntheticSnapshotProvider().load(DashboardFilters()).episodes[0]
+    episode = replace(original, size=1234.5, result_currency="CURRENCY_A")
+    assert episode_rows((episode,))[0]["size"] == 1234.5
+    text = _text(episode_detail(episode))
+    assert "Size" in text and "1,234.50 CURRENCY_A" in text
+    assert "Size N/A" in _text(episode_detail(replace(episode, size=None)))
+    assert "0.00 CURRENCY_A" in _text(episode_detail(replace(episode, size=0)))

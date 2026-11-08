@@ -27,6 +27,17 @@ EPISODE_COLUMNS = [
     {"field": "profile", "headerName": "Profile", "minWidth": 120},
     {"field": "market_class", "headerName": "Market class", "minWidth": 110},
     {"field": "direction", "headerName": "Direction", "minWidth": 90},
+    {
+        "field": "size",
+        "headerName": "Size",
+        "minWidth": 100,
+        "type": "numericColumn",
+        "headerTooltip": "Net result divided by the direction-adjusted relative price change.",
+        "valueFormatter": {
+            "function": "params.value == null ? 'N/A' : params.value.toLocaleString(undefined, "
+            "{minimumFractionDigits: 2, maximumFractionDigits: 2})",
+        },
+    },
     {"field": "status", "headerName": "Status", "minWidth": 88},
     {"field": "duration", "headerName": "Duration", "minWidth": 95},
     {"field": "entry", "headerName": "Entry", "minWidth": 74},

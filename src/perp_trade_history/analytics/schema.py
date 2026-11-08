@@ -97,11 +97,11 @@ class EpisodeRow:
     direction: str
     status: str
     boundary_status: str
-    opened_at_ms: int
+    opened_at_ms: int | None
     closed_at_ms: int | None
-    duration_ms: int
+    duration_ms: int | None
     duration_bucket: str
-    open_year: int
+    open_year: int | None
     open_month: str
     close_year: int | None
     close_month: str
@@ -116,6 +116,13 @@ class EpisodeRow:
     order_count: int
     coverage_status: str
     quality_flags: tuple[str, ...]
+    position_id: str = ""
+    settlement_currency: str = ""
+    observed_at_ms: int | None = None
+
+    @property
+    def sort_time_ms(self) -> int:
+        return self.opened_at_ms or self.closed_at_ms or self.observed_at_ms or 0
 
 
 @dataclass(frozen=True, slots=True)

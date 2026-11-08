@@ -32,6 +32,9 @@ def build_analytics_report(
     statuses: list[str] = []
     gaps: list[CoverageGap] = []
     for episode in episodes:
+        if episode.opened_at_ms is None or episode.duration_ms is None:
+            statuses.append("unknown")
+            continue
         profile = (episode.venue, episode.account_id, episode.market_type)
         profile_rows = rows_by_profile.get(profile, [])
         assessment = indexes.get(profile, empty_index).assessment(

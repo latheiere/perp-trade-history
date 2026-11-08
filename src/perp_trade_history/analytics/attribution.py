@@ -49,6 +49,7 @@ def attribute_cashflows(
             orders[_context_identifier(row, "order_id")].append(row["record_id"])
 
     episodes_by_context: dict[tuple[str, ...], list[EpisodeRow]] = defaultdict(list)
+    episodes_by_position: dict[tuple[str, ...], list[EpisodeRow]] = defaultdict(list)
     for episode in episodes:
         episodes_by_context[
             (
@@ -58,6 +59,11 @@ def attribute_cashflows(
                 episode.symbol,
             )
         ].append(episode)
+        if episode.position_id:
+            episodes_by_position[(
+                episode.venue, episode.account_id, episode.market_type, episode.symbol,
+                episode.position_id,
+            )].append(episode)
 
     attributions: list[CashflowAttribution] = []
     unattributed = 0
@@ -107,6 +113,21 @@ def attribute_cashflows(
                     fraction=Decimal(1),
                 )
             )
+            continue
+
+        position_matches = [
+            episode
+            for episode in episodes_by_position.get(_context_identifier(row, "position_id"), ())
+            if not episode.settlement_currency
+            or episode.settlement_currency == row.get("currency")
+        ] if row.get("position_id") else []
+        if len(position_matches) == 1:
+            attributions.append(_attribution(
+                row, episode_id=position_matches[0].episode_id, method="exact_position",
+                confidence="exact", reason="The cashflow resolves through position identity.",
+                amount=amount, reporting_currency=reporting_currency,
+                reporting_amount=reporting_amount, fraction=Decimal(1),
+            ))
             continue
 
         exact_links: list[EpisodeExecutionLink] = []
@@ -182,8 +203,10 @@ def attribute_cashflows(
         candidates = [
             episode
             for episode in episodes_by_context.get(_context(row), [])
-            if episode.opened_at_ms <= event_time_ms
+            if episode.opened_at_ms is not None and episode.opened_at_ms <= event_time_ms
             and (episode.closed_at_ms is None or event_time_ms < episode.closed_at_ms)
+            and (not row.get("position_id") or not episode.position_id
+                 or row["position_id"] == episode.position_id)
         ]
         if len(candidates) == 1:
             attributions.append(

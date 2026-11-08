@@ -27,6 +27,7 @@ def find_notable_changes(
         if episode.status == "closed"
         and episode.boundary_status == "complete"
         and episode.close_year is not None
+        and episode.duration_ms is not None
     ]
     by_year: dict[int, list[EpisodeRow]] = defaultdict(list)
     for episode in eligible:

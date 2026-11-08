@@ -11,6 +11,7 @@ from perp_trade_history.analytics.changes import find_notable_changes
 from perp_trade_history.analytics.constants import TABLE_TIME_FIELDS, TRADING_CASHFLOW_TYPES
 from perp_trade_history.analytics.coverage import build_analytics_report
 from perp_trade_history.analytics.episodes import EpisodeBuilder, EpisodeBuildResult
+from perp_trade_history.analytics.positions import position_cashflow_totals, reconcile_positions
 from perp_trade_history.analytics.profile import build_data_profile, profile_quality_flags
 from perp_trade_history.analytics.schema import (
     AccountCashflowSummary,
@@ -80,6 +81,10 @@ def build_snapshot_from_tables(
         as_of_ms=effective_as_of_ms,
         coverage_rows=tables["coverage"],
     ).build(tables["executions"])
+    episode_result = reconcile_positions(
+        episode_result, positions=tables.get("positions", []),
+        executions=tables["executions"], coverage=tables["coverage"], as_of_ms=effective_as_of_ms,
+    )
     attribution = attribute_cashflows(
         cashflows=cashflows,
         executions=tables["executions"],
@@ -87,6 +92,14 @@ def build_snapshot_from_tables(
         links=episode_result.links,
         converted=converted,
     )
+    position_totals = position_cashflow_totals(
+        episode_result.episodes, cashflows, converted, tables.get("positions", []),
+        effective_as_of_ms,
+    )
+    reported_positions = {row.episode_id for row in position_totals}
+    episode_cashflows = tuple(
+        row for row in attribution.episode_summaries if row.episode_id not in reported_positions
+    ) + position_totals
     quality_flags = _quality_flags(
         base=profile_quality_flags(tables, profile),
         episode_result=episode_result,
@@ -115,10 +128,10 @@ def build_snapshot_from_tables(
         episodes=episode_result.episodes,
         execution_links=episode_result.links,
         cashflow_attributions=attribution.attributions,
-        episode_cashflows=attribution.episode_summaries,
+        episode_cashflows=episode_cashflows,
         account_cashflows=attribution.account_summaries,
         notable_changes=find_notable_changes(
-            episode_result.episodes, attribution.episode_summaries
+            episode_result.episodes, episode_cashflows
         ),
         dimensions=_dimensions(
             episode_result.episodes,
@@ -129,7 +142,7 @@ def build_snapshot_from_tables(
 
 def _latest_fact_time(tables: dict[str, list[dict[str, str]]]) -> int:
     latest = 0
-    for name in ("executions", "cashflows", "account_snapshots"):
+    for name in ("executions", "cashflows", "account_snapshots", "positions"):
         for row in tables.get(name, []):
             for field in TABLE_TIME_FIELDS[name]:
                 with suppress(ValueError):
@@ -307,7 +320,9 @@ def _dimensions(
             )
             if any(episode.duration_bucket == bucket for episode in episode_rows)
         ),
-        open_years=tuple(sorted({episode.open_year for episode in episode_rows})),
+        open_years=tuple(sorted({
+            episode.open_year for episode in episode_rows if episode.open_year is not None
+        })),
         close_years=tuple(
             sorted(
                 {

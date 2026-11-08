@@ -33,7 +33,8 @@ The controls at the top apply to the whole dashboard:
 
 - **Profile** selects an account source.
 - **Market class** selects the available instrument category.
-- **Date range** limits episodes by their opening date.
+- **Date range** limits episodes by their opening date, or by a known closing or
+  observation date when the opening date is unavailable.
 - **Aggregation interval** groups performance by month, quarter, or year.
 - **Timezone** changes displayed timestamps, weekday grouping, and time-of-day
   grouping.
@@ -114,6 +115,13 @@ You can:
 An episode is a reconstructed period of continuous exposure. It can contain many
 executions and several attributed cashflows.
 
+The ledger also includes retained historical positions when individual executions
+are unavailable. Matching position records and executions appear as one trade.
+Known dates, average prices, and financial results remain available; fields that
+require missing inputs show **Unavailable**. Nonzero position observations can
+remain visible with unknown opening dates or durations. An empty position snapshot
+does not establish a historical trade.
+
 The detail tabs provide:
 
 - **Overview** — result, entry, exit, duration, direction, status, and tags;
@@ -173,10 +181,15 @@ For older history outside ordinary API retention, follow the
 
 ## What the calculations use
 
-The dashboard uses normalized executions and attributable trading cashflows. It does
+The dashboard uses normalized positions, executions, and retained trading cashflows. It does
 not predict performance or fit a machine-learning model. A metric appears only when
 the collected records provide the required inputs; unsupported estimates are not
 substituted.
+
+Retained position totals contribute once to the matching trade's result. Detailed
+cashflows remain available when retained, and are not added again to a position
+total. Unknown results do not count as zero or as losing trades, and unknown
+durations do not contribute to holding-time statistics.
 
 All dashboard activity is read-only. Opening the page, filtering, and drilling down
 cannot place or modify orders.

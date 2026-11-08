@@ -129,7 +129,7 @@ def _adapt_analytics(
                 for row in analytics.episodes
                 if _matches_analytics_episode(row, filters, amounts, zone)
             ),
-            key=lambda row: (row.opened_at_ms, row.episode_id),
+            key=lambda row: (row.sort_time_ms, row.episode_id),
             reverse=True,
         )
     )
@@ -248,15 +248,20 @@ def _matches_analytics_episode(
         return False
     if filters.duration != "all" and row.duration_bucket != filters.duration:
         return False
-    opened = datetime.fromtimestamp(row.opened_at_ms / 1000, tz=UTC).astimezone(zone)
-    if filters.start_date and opened.date() < _parse_date(filters.start_date):
-        return False
-    if filters.end_date and opened.date() > _parse_date(filters.end_date):
-        return False
-    if filters.weekday is not None and opened.weekday() != filters.weekday:
-        return False
-    if filters.hour_bucket is not None and (opened.hour // 2) * 2 != filters.hour_bucket:
-        return False
+    if row.sort_time_ms:
+        occurred = datetime.fromtimestamp(row.sort_time_ms / 1000, tz=UTC).astimezone(zone)
+        if filters.start_date and occurred.date() < _parse_date(filters.start_date):
+            return False
+        if filters.end_date and occurred.date() > _parse_date(filters.end_date):
+            return False
+    if filters.weekday is not None or filters.hour_bucket is not None:
+        if row.opened_at_ms is None:
+            return False
+        opened = datetime.fromtimestamp(row.opened_at_ms / 1000, tz=UTC).astimezone(zone)
+        if filters.weekday is not None and opened.weekday() != filters.weekday:
+            return False
+        if filters.hour_bucket is not None and (opened.hour // 2) * 2 != filters.hour_bucket:
+            return False
     amount = amounts.get(row.episode_id)
     outcome = (
         "open"
@@ -293,7 +298,7 @@ def _analytics_kpis(
 ) -> tuple[Kpi, ...]:
     attributed = [amounts[row.episode_id] for row in closed if row.episode_id in amounts]
     total = sum(attributed, Decimal(0))
-    durations = sorted(row.duration_ms for row in closed)
+    durations = sorted(row.duration_ms for row in closed if row.duration_ms is not None)
     median_duration = durations[len(durations) // 2] if durations else None
     wins = sum(amount > 0 for amount in attributed)
     win_rate = wins / len(attributed) * 100 if attributed else None
@@ -305,7 +310,7 @@ def _analytics_kpis(
             "Comparable reporting amounts",
             "positive" if total >= 0 and attributed else "neutral",
         ),
-        Kpi("Closed episodes", f"{len(closed):,}", "Observed", "Reconstructed", "info"),
+        Kpi("Closed episodes", f"{len(closed):,}", "Observed", "", "info"),
         Kpi(
             "Win rate",
             f"{win_rate:.1f}%" if win_rate is not None else "Unavailable",
@@ -398,6 +403,8 @@ def _analytics_heatmap(
     comparable = any(row.episode_id in amounts for row in rows)
     cells: dict[tuple[int, int], list[float]] = defaultdict(list)
     for row in rows:
+        if row.opened_at_ms is None:
+            continue
         opened = datetime.fromtimestamp(row.opened_at_ms / 1000, tz=UTC).astimezone(zone)
         hour_index = opened.hour // 2
         if comparable:
@@ -508,7 +515,8 @@ def _analytics_years(
                 (100.0, float("inf")),
             )
         )
-        average_ms = sum(row.duration_ms for row in episodes) // len(episodes)
+        durations = [row.duration_ms for row in episodes if row.duration_ms is not None]
+        average_ms = sum(durations) // len(durations) if durations else None
         cards.append(
             YearSummary(
                 str(year),
@@ -589,7 +597,7 @@ def _analytics_episode(
     cashflows: tuple[CashflowDetail, ...],
     zone: ZoneInfo,
 ) -> Episode:
-    occurred = _format_timestamp(row.opened_at_ms, include_time=True, zone=zone)
+    occurred = _format_timestamp(row.sort_time_ms or None, include_time=True, zone=zone)
     outcome = (
         "Open"
         if row.status == "open"
@@ -642,18 +650,25 @@ def _analytics_episode(
 def _analytics_date_range(rows: tuple[EpisodeRow, ...], zone: ZoneInfo) -> str:
     if not rows:
         return "No available range"
-    start = min(row.opened_at_ms for row in rows)
-    end = max(row.closed_at_ms or row.opened_at_ms for row in rows)
+    starts = [row.sort_time_ms for row in rows if row.sort_time_ms]
+    ends = [row.closed_at_ms or row.sort_time_ms for row in rows
+            if row.closed_at_ms or row.sort_time_ms]
+    if not starts:
+        return "No available range"
+    start = min(starts)
+    end = max(ends)
     return f"{_format_timestamp(start, zone=zone)} – {_format_timestamp(end, zone=zone)}"
 
 
 def _format_timestamp(
-    value: int,
+    value: int | None,
     *,
     include_time: bool = False,
     month: bool = False,
     zone: ZoneInfo | None = None,
 ) -> str:
+    if not value:
+        return "Unavailable"
     target_zone = zone or ZoneInfo("UTC")
     parsed = datetime.fromtimestamp(value / 1000, tz=UTC).astimezone(target_zone)
     if month:
@@ -665,7 +680,9 @@ def _format_timestamp(
     )
 
 
-def _duration(value: int) -> str:
+def _duration(value: int | None) -> str:
+    if value is None:
+        return "Unavailable"
     minutes = value // 60_000
     days, remainder = divmod(minutes, 24 * 60)
     hours, remaining_minutes = divmod(remainder, 60)
@@ -751,10 +768,11 @@ def _parse_date(value: str) -> date:
 def _analytics_date_bounds(
     rows: tuple[EpisodeRow, ...], zone: ZoneInfo
 ) -> tuple[str, str]:
-    if not rows:
+    times = [row.sort_time_ms for row in rows if row.sort_time_ms]
+    if not times:
         return "", ""
-    start = datetime.fromtimestamp(min(row.opened_at_ms for row in rows) / 1000, tz=UTC)
-    end_ms = max(row.closed_at_ms or row.opened_at_ms for row in rows)
+    start = datetime.fromtimestamp(min(times) / 1000, tz=UTC)
+    end_ms = max(row.closed_at_ms or row.sort_time_ms for row in rows)
     end = datetime.fromtimestamp(end_ms / 1000, tz=UTC)
     return start.astimezone(zone).date().isoformat(), end.astimezone(zone).date().isoformat()
 

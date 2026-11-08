@@ -34,8 +34,7 @@ EPISODE_COLUMNS = [
         "type": "numericColumn",
         "headerTooltip": "Net result divided by the direction-adjusted relative price change.",
         "valueFormatter": {
-            "function": "params.value == null ? 'N/A' : params.value.toLocaleString(undefined, "
-            "{minimumFractionDigits: 2, maximumFractionDigits: 2})",
+            "function": "params.value == null ? 'N/A' : d3.format(',.2f')(params.value)",
         },
     },
     {"field": "status", "headerName": "Status", "minWidth": 88},

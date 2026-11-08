@@ -6,6 +6,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from perp_trade_history.analytics.schema import (
     AnalyticsCapabilities,
     EpisodeRow,
@@ -17,6 +19,7 @@ from perp_trade_history.dashboard.providers import (
     AnalyticsSnapshotProvider,
     SyntheticSnapshotProvider,
     _apply_horizon,
+    _artificial_size,
     _cashflow_performance,
     _matches_analytics_episode,
 )
@@ -190,6 +193,7 @@ def test_analytics_provider_derives_safe_cashflow_patterns(tmp_path, monkeypatch
     assert band.net_average == 5.0
     assert snapshot.episodes[0].outcome == "Win"
     assert snapshot.episodes[0].net_result == 5.0
+    assert snapshot.episodes[0].size == 50.0
 
 
 def test_analytics_provider_reuses_canonical_snapshot_across_filters(tmp_path, monkeypatch) -> None:
@@ -392,3 +396,38 @@ def test_analytics_and_details_share_one_read_of_canonical_inputs(tmp_path, monk
     assert provider._cached_analytics is None
     assert provider._cached_execution_rows == provider._cached_cashflow_rows == []
     assert provider._conversion._amounts == {}
+
+
+@pytest.mark.parametrize("direction,entry,exit_price,net,expected", [
+    ("long", "100", "110", "20", 200.0),
+    ("short", "100", "90", "20", 200.0),
+    ("long", "100", "90", "-20", 200.0),
+    ("short", "100", "110", "-20", 200.0),
+    ("long", "100", "110", "-2", -20.0),
+    ("long", "100", "110", "0", 0.0),
+])
+def test_artificial_size_uses_net_result_and_direction_adjusted_relative_price_change(
+    direction, entry, exit_price, net, expected,
+) -> None:
+    row = replace(_episode(), direction=direction, entry_vwap=entry, exit_vwap=exit_price)
+    assert _artificial_size(row, Decimal(net)) == expected
+
+
+@pytest.mark.parametrize("overrides,amount", [
+    ({"status": "open"}, Decimal("5")),
+    ({"direction": ""}, Decimal("5")),
+    ({"entry_vwap": ""}, Decimal("5")),
+    ({"exit_vwap": ""}, Decimal("5")),
+    ({"entry_vwap": "0"}, Decimal("5")),
+    ({"exit_vwap": "0"}, Decimal("5")),
+    ({"entry_vwap": "NaN"}, Decimal("5")),
+    ({"exit_vwap": "Infinity"}, Decimal("5")),
+    ({"exit_vwap": "10"}, Decimal("5")),
+    ({}, None),
+    ({}, Decimal("NaN")),
+    ({}, Decimal("1e309")),
+])
+def test_artificial_size_remains_unavailable_without_a_finite_closed_trade_price_move(
+    overrides, amount,
+) -> None:
+    assert _artificial_size(replace(_episode(), **overrides), amount) is None

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from hashlib import sha256
+from math import isfinite
 from threading import RLock
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -644,7 +645,28 @@ def _analytics_episode(
             else "Low"
         ),
         samples=row.execution_count,
+        size=_artificial_size(row, amount),
     )
+
+
+def _artificial_size(row: EpisodeRow, amount: Decimal | None) -> float | None:
+    if row.status != "closed" or amount is None or row.direction not in {"long", "short"}:
+        return None
+    try:
+        entry, exit_price = Decimal(row.entry_vwap), Decimal(row.exit_vwap)
+        if not all(value.is_finite() for value in (entry, exit_price, amount)):
+            return None
+        if entry <= 0 or exit_price <= 0:
+            return None
+        move = (exit_price - entry) / entry
+        if not move:
+            return None
+        if row.direction == "short":
+            move = -move
+        value = float(amount / move)
+    except (DecimalException, ValueError, OverflowError):
+        return None
+    return value if isfinite(value) else None
 
 
 def _analytics_date_range(rows: tuple[EpisodeRow, ...], zone: ZoneInfo) -> str:

@@ -287,7 +287,10 @@ def test_reported_financial_components_require_complete_inputs_and_supported_cur
             ]
         }
     )
-    assert _dashboard(history).episodes[0].net_result == 2.5
+    snapshot = _dashboard(history)
+    assert snapshot.episodes[0].net_result == 2.5
+    assert snapshot.episodes[0].size == 12.5
+    assert snapshot.episodes[0].executions == ()
     history.rows["positions"][0]["funding"] = ""
     assert _dashboard(history).episodes[0].net_result is None
     history.rows["positions"][0].update(funding="-0.5", settlement_currency="CURRENCY_B")

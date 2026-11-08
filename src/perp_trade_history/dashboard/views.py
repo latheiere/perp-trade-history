@@ -496,6 +496,7 @@ def episode_rows(episodes: Iterable[Episode]) -> list[dict[str, object]]:
             "profile": episode.profile,
             "market_class": episode.market_class,
             "direction": episode.direction,
+            "size": episode.size,
             "status": episode.status,
             "duration": episode.duration,
             "duration_bucket": episode.duration_bucket,
@@ -571,6 +572,11 @@ def episode_detail(episode: Episode | None) -> dmc.Box:
                             dmc.SimpleGrid(
                                 [
                                     _detail_stat("Net result", _episode_result(episode)),
+                                    _detail_stat(
+                                        "Size",
+                                        f"{episode.size:,.2f} {episode.result_currency}".strip()
+                                        if episode.size is not None else "N/A",
+                                    ),
                                     _detail_stat("Entry", episode.entry),
                                     _detail_stat("Exit", episode.exit),
                                     _detail_stat("Duration", episode.duration),

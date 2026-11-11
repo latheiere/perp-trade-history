@@ -56,12 +56,24 @@ Read retained history without collecting new data:
 .venv/bin/perp-trade-history-pnl --config config/config.toml
 ```
 
+The default `--view venue` groups by venue and base symbol. Use `--view symbol`
+to combine matching base names across the selected venues and display one total
+for the report. Use `--view contract` to see full contract symbols within each
+venue. All views use the configured reporting currency.
+
+`--venue` and `--symbol` filter the history before grouping. Repeat either option
+to select several values. `--symbol` takes the exact contract symbol. Use `--start`
+and `--end` to limit the time range and `--period` to split rows into UTC time
+buckets. `--include-non-pnl` adds transfers, conversions, and other non-PnL cashflows
+to `TOTAL`.
+
 `TRADES`, between `TOTAL` and `EVENTS`, counts observed position cycles. Adding to
 a position or partially reducing it stays within one trade until the position is
 fully closed. Open positions and positions with missing history boundaries also
 count once. Counts depend on the retained evidence; they do not certify complete
 history. With period grouping, closed trades belong to their closing period, and
 open trades belong to their first observed activity, clipped to `--start` when set.
+Combined rows show the least complete coverage among their contributing venues.
 
 All amount columns are shown by default. Add `--no-extra-columns` to hide `REWARD`
 through `OTHER`, or `--extra-columns` to show them. Hidden amounts remain included
